@@ -174,8 +174,10 @@ def _csv_to_memory_db(path):
     return con
 
 
-_sqlite_cache = {}   # path -> connection
-_sqlite_lock  = threading.Lock()
+_sqlite_cache    = {}   # path -> connection
+_sqlite_lock     = threading.Lock()
+_validate_cache  = {}   # (con_id, table) -> frozenset of column names
+_index_cache     = set() # (con_id, table) already indexed
 
 
 def get_connection(cfg):
@@ -201,25 +203,49 @@ def get_connection(cfg):
 
 
 def _validate_identifiers(con, table, columns):
-    """Ensure table + mapped columns actually exist (prevents broken/injected SQL)."""
+    """Ensure table + mapped columns exist. Result is cached per connection."""
+    key = (id(con), table)
+    if key in _validate_cache:
+        return _validate_cache[key]
     if not _IDENT_RE.match(table):
         raise ValueError("Invalid table name: %s" % table)
     have = {row[1] for row in con.execute('PRAGMA table_info("%s")' % table)}
     if not have:
         raise ValueError("Table '%s' not found in database" % table)
-    for key, col in columns.items():
+    for k, col in columns.items():
         if col and col not in have:
             raise ValueError(
                 "Column '%s' (mapped as %s) not in table '%s'. Available: %s"
-                % (col, key, table, ", ".join(sorted(have)))
+                % (col, k, table, ", ".join(sorted(have)))
             )
+    _validate_cache[key] = have
     return have
+
+
+def _ensure_parts_indexes(con, table, cols):
+    """Create indexes on searchable columns once per connection."""
+    key = (id(con), table)
+    if key in _index_cache:
+        return
+    _index_cache.add(key)
+    try:
+        for k in ("part_no", "description", "category"):
+            col = cols.get(k)
+            if col:
+                con.execute(
+                    'CREATE INDEX IF NOT EXISTS "idx_%s_%s" ON "%s"("%s")'
+                    % (table, col, table, col)
+                )
+        con.commit()
+    except Exception:
+        pass
 
 
 def query_parts(cfg, search="", limit=100):
     con, table = get_connection(cfg)
     cols = cfg["columns"]
     _validate_identifiers(con, table, cols)
+    _ensure_parts_indexes(con, table, cols)
 
     def sel(key):
         c = cols.get(key)
@@ -242,8 +268,9 @@ def query_parts(cfg, search="", limit=100):
     sql += " ORDER BY \"%s\"" % cols.get("part_no", "part_no")
     sql += " LIMIT ?"
     params.append(int(limit))
-    rows = con.execute(sql, params).fetchall()
-    desc = [d[0] for d in con.execute(sql, params).description]
+    cur  = con.execute(sql, params)
+    rows = cur.fetchall()
+    desc = [d[0] for d in cur.description]
     out = []
     for r in rows:
         item = dict(zip(desc, r))

@@ -37,7 +37,6 @@
       sheets: state.sheets, activeSheetId: state.activeSheetId,
       activeLayerId: state.activeLayerId, wastagePct: state.wastagePct,
       labourRate: state.labourRate, manualTakeoff: state.manualTakeoff || [],
-      customSymbols: state.customSymbols || [], customParts: state.customParts || [],
       circuits: state.circuits || [],
       labelScale: state.labelScale, labelColor: state.labelColor
     })); } catch(e) { return null; }
@@ -58,8 +57,6 @@
     state.wastagePct     = snap.wastagePct;
     state.labourRate     = snap.labourRate;
     state.manualTakeoff  = snap.manualTakeoff  || [];
-    state.customSymbols  = snap.customSymbols  || [];
-    state.customParts    = snap.customParts    || [];
     state.circuits       = snap.circuits       || [];
     state.labelScale     = snap.labelScale     != null ? snap.labelScale : 0.4;
     state.labelColor     = snap.labelColor     || "#e7edf5";
@@ -2536,6 +2533,13 @@
       window.syncRefLabel      = syncRefLabel;
       window.syncAllRefLabels  = syncAllRefLabels;
       window.openAssign        = openAssign;
+      // Debounce refreshTakeoff so rapid drag/resize events don't hammer the DOM
+      var _refreshTakeoffTimer = null;
+      var _refreshTakeoffImmediate = refreshTakeoff;
+      refreshTakeoff = function () {
+        clearTimeout(_refreshTakeoffTimer);
+        _refreshTakeoffTimer = setTimeout(_refreshTakeoffImmediate, 150);
+      };
       window.refreshTakeoff    = refreshTakeoff;
       window.routeAutoCorners  = routeAutoCorners;
       // Auto-restore last open project on page load / refresh
