@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Devine Estimator</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">
+        <div class="logo">DE</div>
+        <div>The Devine Estimator<br /><small>TAKEOFF &amp; COSTING</small></div>
+      </div>
+      <input id="projName" class="proj-name" placeholder="Untitled project" />
+      <div class="toolbar">
+        <button class="btn ghost" id="btnNew">New</button>
+        <button class="btn ghost" id="btnOpen">Open</button>
+        <button class="btn primary" id="btnSave">Save</button>
+        <button class="btn ghost" id="btnExportPDF" title="Export marked-up plan as PDF">📄 PDF</button>
+        <div class="sep" style="width:1px;height:20px;background:var(--border,#2e3a4a);margin:0 2px"></div>
+        <button class="btn ghost" id="btnUndo" title="Undo (Ctrl+Z)" disabled style="min-width:36px;padding:0 8px">↩</button>
+        <button class="btn ghost" id="btnRedo" title="Redo (Ctrl+Y)" disabled style="min-width:36px;padding:0 8px">↪</button>
+      </div>
+      <div class="sep"></div>
+      <div class="toolbar" id="toolButtons">
+        <button class="tool active" data-tool="select"    title="Select / move (V)"><svg viewBox="0 0 24 24"><path d="M4 3l7 17 2-7 7-2z"/></svg><span>Select</span></button>
+        <button class="tool" data-tool="calibrate" title="Set scale (C)"><svg viewBox="0 0 24 24"><path d="M3 17h18M5 17v-3M9 17v-5M13 17v-3M17 17v-5M21 17v-3"/></svg><span>Scale</span></button>
+        <button class="tool" data-tool="symbol"    title="Place symbol (S)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 9v6M9 12h6"/></svg><span>Symbol</span></button>
+        <button class="tool" data-tool="line"      title="Draw circuit (L)"><svg viewBox="0 0 24 24"><path d="M4 20L20 4M4 20l3-1M20 4l-1 3"/></svg><span>Circuit</span></button>
+        <button class="tool" data-tool="route"     title="Draw cable route (R)"><svg viewBox="0 0 24 24"><path d="M4 20L20 4" stroke-dasharray="3 2"/><path d="M4 20l3-1M20 4l-1 3"/></svg><span>Route</span></button>
+        <button class="tool" data-tool="text"      title="Add text label (T)"><svg viewBox="0 0 24 24"><path d="M4 7h16M12 7v13M8 20h8"/></svg><span>Text</span></button>
+        <button class="tool" data-tool="measure"   title="Measure distance (M)"><svg viewBox="0 0 24 24"><path d="M2 12h20M2 12l4-4M2 12l4 4M22 12l-4-4M22 12l-4 4"/></svg><span>Measure</span></button>
+      </div>
+      <div class="spacer"></div>
+      <div class="toolbar">
+        <button class="btn ghost" id="btnCircuits">⚡ Circuits</button>
+        <button class="btn ghost" id="btnTakeoff">Takeoff &#9656;</button>
+        <button class="btn ghost" id="btnSettings">&#9881; Settings</button>
+      </div>
+    </header>
+
+    <aside class="side" id="left">
+      <div class="resize-handle resize-handle-left" id="resizeLeft"></div>
+      <div class="section">
+        <h3>Sheets <span class="count" id="sheetCount"></span>
+          <button class="icon-btn" id="addSheet" style="font-size:16px">&#65291;</button>
+        </h3>
+        <div class="section-body" id="sheetList"></div>
+        <input type="file" id="fileInput" accept="application/pdf,image/*" hidden />
+      </div>
+
+      <div class="section">
+        <h3>Symbols <span class="count" id="symCount"></span>
+          <button class="icon-btn" id="addSymbol" title="Create custom symbol" style="font-size:16px">&#65291;</button>
+          <button class="icon-btn" id="btnImportDxf" title="Import DXF/DWG symbols" style="font-size:12px">DXF</button>
+        </h3>
+        <div class="section-body">
+          <div class="cat-label" style="--c:var(--faint);margin-top:2px">
+            Size
+            <input id="symSize" type="range" min="14" max="80" value="30" style="flex:1;accent-color:var(--accent)">
+            <span class="layer-meta" id="symSizeVal">30</span>
+          </div>
+          <div class="cat-label" style="--c:var(--faint)">
+            Filter by layer
+            <select id="symLayerFilter" style="flex:1;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;color:var(--text);color-scheme:dark;padding:2px 4px;font-size:11px">
+              <option value="">All symbols</option>
+            </select>
+          </div>
+          <div id="symbolPalette"></div>
+        </div>
+      </div>
+
+      <div class="section" style="flex:1">
+        <h3>Layers <span class="count" id="layerCount"></span>
+          <button class="icon-btn" id="addLayer" style="font-size:16px">&#65291;</button>
+          <button class="icon-btn" id="showAllLayers" title="Show all layers" style="font-size:13px">&#128065;</button>
+          <button class="icon-btn" id="hideAllLayers" title="Hide all layers" style="font-size:13px">&#128584;</button>
+        </h3>
+        <p style="color:var(--faint);font-size:11px;margin:2px 8px 4px">Click ✏️ to rename · click the colour swatch to recolour.</p>
+        <div class="section-body" id="layerList"></div>
+      </div>
+    </aside>
+
+    <main id="canvas-wrap">
+      <div id="stage"></div>
+      <div id="marqueeRect"></div>
+      <div id="multiSelectBanner">
+        <span id="multiSelectCount"></span>
+        <label style="font-size:11px;color:var(--muted)">Move to layer:</label>
+        <select id="multiLayerPicker"><option value="">— select —</option></select>
+        <button class="btn" id="multiLayerApply" style="padding:3px 10px;font-size:12px">Apply</button>
+        <button class="btn ghost" id="multiSelectClear" style="padding:3px 8px;font-size:12px">✕</button>
+      </div>
+      <div class="empty-state" id="emptyState">
+        <div class="big">No plan loaded</div>
+        <div class="drop" id="dropZone">Drop a PDF or image here<br /><span style="font-size:11px">or click to browse</span></div>
+      </div>
+      <div class="canvas-overlay-tip" id="tip"></div>
+      <div class="zoom-cluster">
+        <button class="btn" id="zoomIn">&#65291;</button>
+        <button class="btn" id="zoomOut">&#65293;</button>
+        <button class="btn" id="zoomFit">&#10530;</button>
+      </div>
+    </main>
+
+    <aside class="side" id="right">
+      <div class="resize-handle resize-handle-right" id="resizeRight"></div>
+      <div class="tabs">
+        <div class="tab active" data-tab="takeoff">Takeoff</div>
+        <div class="tab" data-tab="parts">Parts</div>
+        <div class="tab" data-tab="properties">Properties</div>
+      </div>
+      <div class="tab-body" id="tab-takeoff"></div>
+      <div class="tab-body" id="tab-parts" style="display:none">
+        <button class="btn" id="addPart"          style="width:100%;justify-content:center;margin-bottom:6px">&#65291; Add custom part</button>
+        <button class="btn ghost" id="btnImportParts" style="width:100%;justify-content:center;margin-bottom:6px">📥 Import from CSV</button>
+        <button class="btn ghost" id="btnEditPartsDb" style="width:100%;justify-content:center;margin-bottom:6px">✏️ Edit parts database</button>
+        <button class="btn" id="btnAddManualItem"  style="width:100%;justify-content:center;margin-bottom:6px">➕ Add manual takeoff item</button>
+        <button class="btn" id="btnCreatePackage"  style="width:100%;justify-content:center;margin-bottom:8px">📦 Create packaged part</button>
+        <input class="parts-search" id="partsSearch" placeholder="Search parts…" />
+        <div id="partsResults"></div>
+      </div>
+      <div class="tab-body" id="tab-properties" style="display:none">
+        <p style="color:var(--faint);padding:12px 8px;font-size:12px">Select a symbol on the plan to view and edit its properties.</p>
+      </div>
+    </aside>
+
+    <!-- ── Circuits bottom drawer ── -->
+    <div id="circuitsDrawer">
+      <div id="circuitsDrawerHandle" title="Drag to resize"></div>
+      <div id="circuitsDrawerInner">
+        <div id="tab-circuits"></div>
+      </div>
+    </div>
+
+    <footer id="status">
+      <span><span class="k">TOOL</span> <b id="stTool">Select</b></span>
+      <span><span class="k">SCALE</span> <b id="stScale">not set</b></span>
+      <span><span class="k">CURSOR</span> <b id="stCursor">&mdash;</b></span>
+      <span><span class="k">ZOOM</span> <b id="stZoom">100%</b></span>
+      <span class="pill" id="stHint">Upload a plan to begin</span>
+    </footer>
+  </div>
+
+  <!-- ═══════ EXISTING MODALS (unchanged) ═══════ -->
+
+  <div class="modal-back" id="modalScale">
+    <div class="modal" style="width:420px">
+      <h2>Set drawing scale</h2>
+      <div class="body">
+        <p style="color:var(--muted);margin-top:0">You drew a calibration line over a known dimension. Enter its real-world length and everything will be measured in metres.</p>
+        <div class="field">
+          <label>Known length</label>
+          <div class="grid2">
+            <input id="scaleValue" type="number" step="any" placeholder="e.g. 5" />
+            <select id="scaleUnit">
+              <option value="1">metres</option>
+              <option value="0.001">millimetres</option>
+              <option value="0.01">centimetres</option>
+            </select>
+          </div>
+          <div class="hint" id="scalePxHint"></div>
+        </div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="scaleCancel">Cancel</button>
+        <button class="btn primary" id="scaleApply">Apply scale</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalSettings">
+    <div class="modal">
+      <h2>Parts database</h2>
+      <div class="body">
+        <div class="field">
+          <label>Database path (on the server)</label>
+          <input id="dbPath" placeholder="/path/to/parts.db or parts.csv" />
+          <div class="hint">Absolute path to a SQLite (.db/.sqlite) or .csv file on the server machine.</div>
+        </div>
+        <div class="field"><label>Table name (SQLite only)</label><input id="dbTable" placeholder="parts" /></div>
+        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">Map your columns:</p>
+        <div class="grid2">
+          <div class="field"><label>Part number</label><input id="colPart" /></div>
+          <div class="field"><label>Description</label><input id="colDesc" /></div>
+          <div class="field"><label>Cost price</label><input id="colCost" /></div>
+          <div class="field"><label>Retail price</label><input id="colRetail" /></div>
+          <div class="field"><label>Unit (optional)</label><input id="colUnit" /></div>
+          <div class="field"><label>Category (optional)</label><input id="colCat" /></div>
+          <div class="field"><label>Labour hrs (optional)</label><input id="colLabour" /></div>
+        </div>
+        <div id="settingsMsg"></div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Ref label style</p>
+        <div class="field" style="margin-bottom:8px">
+          <label>Label size &nbsp;<span id="glbLabelScaleVal" style="color:var(--accent);font-weight:600">40%</span></label>
+          <input id="glbLabelScale" type="range" min="0.1" max="2.0" step="0.05" value="0.4"
+            style="width:100%;accent-color:var(--accent,#ffb02e);cursor:pointer;margin-top:4px">
+          <div class="hint">Size of ref labels relative to the symbol icon (10% – 200%)</div>
+        </div>
+        <div class="field" style="display:flex;align-items:center;gap:10px">
+          <label style="margin:0;white-space:nowrap">Label colour</label>
+          <input id="glbLabelColor" type="color" value="#e7edf5"
+            style="width:38px;height:30px;padding:2px;border:1px solid var(--border);border-radius:5px;background:var(--bg-alt);cursor:pointer;flex-shrink:0">
+          <button id="glbLabelColorReset" class="btn ghost" style="padding:3px 10px;font-size:12px">Reset</button>
+        </div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="settingsCancel">Close</button>
+        <button class="btn primary" id="settingsSave">Save &amp; test</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalOpen">
+    <div class="modal" style="width:460px">
+      <h2>Open project</h2>
+      <div class="body" id="projList"><p style="color:var(--muted)">Loading&hellip;</p></div>
+      <div class="foot"><button class="btn ghost" id="openCancel">Cancel</button></div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalAssign">
+    <div class="modal" style="width:460px">
+      <h2 id="assignTitle">Symbol defaults</h2>
+      <div class="body">
+        <input class="parts-search" id="assignSearch" placeholder="Search parts to link…" />
+        <div id="assignResults"></div>
+        <div class="field" style="margin:12px 0 0"><label>Labour (hrs per unit)</label><input id="labourHrs" type="number" step="any" placeholder="e.g. 0.35" /></div>
+        <div id="dropConfig" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+          <p style="color:var(--muted);font-size:12px;margin:0 0 8px">Cable drop for this device:</p>
+          <div class="grid2">
+            <div class="field" style="margin:0"><label>Drop length (m)</label><input id="dropLen" type="number" step="any" placeholder="e.g. 3" /></div>
+            <div class="field" style="margin:0"><label>Adds to layer</label><select id="dropLayer"></select></div>
+          </div>
+          <!-- FEATURE 4: assign symbol to a palette layer group -->
+          <div class="field" style="margin-top:8px">
+            <label>Symbol layer group <span style="color:var(--muted);font-size:11px">(palette filter)</span></label>
+            <select id="symLayerPicker" style="width:100%"></select>
+          </div>
+          <div class="field" style="margin-top:8px;border-top:1px solid var(--border);padding-top:10px">
+            <label>Default current <span style="color:var(--muted);font-size:11px">(A — AS/NZS 3000 Table C9 type default)</span></label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input id="assignCurrentA" type="number" step="0.1" min="0" placeholder="e.g. 0.5" style="flex:1" />
+              <span style="font-size:12px;color:var(--muted);white-space:nowrap">A per device</span>
+            </div>
+            <p style="color:var(--faint);font-size:11px;margin:4px 0 0">Used for circuit load estimation. Can be overridden per placed instance in the Properties panel.</p>
+          </div>
+        </div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="assignClear">Unlink</button>
+        <button class="btn ghost" id="assignCancel">Cancel</button>
+        <button class="btn primary" id="assignSave" style="display:none">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalSymbol">
+    <div class="modal" style="width:440px">
+      <h2 id="symbolModalTitle">Add custom symbol</h2>
+      <div class="body">
+        <input type="hidden" id="symEditId" />
+        <div class="field"><label>Name</label><input id="symName" placeholder="e.g. Emergency light" /></div>
+        <div class="field"><label>Category</label>
+          <select id="symCat">
+            <option value="electrical">Electrical</option>
+            <option value="data">Data / Comms</option>
+            <option value="mechanical">Mechanical</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="field" id="symImgField">
+          <label>Icon image — PNG, SVG or JPG (optional)</label>
+          <input id="symImg" type="file" accept="image/*,.svg" />
+          <div class="hint">Leave blank to keep the current image, or upload a new one to replace it.</div>
+        </div>
+        <div id="symPreview" style="margin-top:6px"></div>
+        <div id="symbolMsg"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="symbolDelete" style="margin-right:auto;color:var(--red,#f87171);display:none">Delete</button>
+        <button class="btn ghost" id="symbolCancel">Cancel</button>
+        <button class="btn primary" id="symbolSave">Add symbol</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalPart">
+    <div class="modal" style="width:460px">
+      <h2 id="partTitle">Add custom part</h2>
+      <div class="body">
+        <div class="grid2">
+          <div class="field"><label>Part number</label><input id="partNo" placeholder="e.g. CUST-001" /></div>
+          <div class="field"><label>Unit</label><input id="partUnit" placeholder="each / m" /></div>
+        </div>
+        <div class="field"><label>Description</label><input id="partDesc" placeholder="Description" /></div>
+        <div class="grid2">
+          <div class="field"><label>Cost price</label><input id="partCost" type="number" step="any" placeholder="0.00" /></div>
+          <div class="field"><label>Retail price</label><input id="partRetail" type="number" step="any" placeholder="0.00" /></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Labour (hrs/unit)</label><input id="partLabour" type="number" step="any" placeholder="0" /></div>
+          <div class="field"><label>Category</label><input id="partCat" placeholder="optional" /></div>
+        </div>
+        <div id="partMsg"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="partCancel">Cancel</button>
+        <button class="btn primary" id="partSave">Save part</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalQuote">
+    <div class="modal" style="width:480px">
+      <h2>Generate quote</h2>
+      <div class="body">
+        <div class="grid2">
+          <div class="field"><label>Business name</label><input id="qBusiness" placeholder="ACME Electrical Pty Ltd" /></div>
+          <div class="field"><label>Quote number</label><input id="qNumber" placeholder="Q-1001" /></div>
+        </div>
+        <div class="field"><label>Your details</label><input id="qDetails" placeholder="12 Main St · 0400 000 000 · ABN 00 000 000 000" /></div>
+        <div class="field"><label>Client / bill to</label><input id="qClient" placeholder="Client name &amp; site" /></div>
+        <div class="grid2">
+          <div class="field"><label>Tax / GST %</label><input id="qTax" type="number" step="any" value="10" /></div>
+          <div class="field"><label>Show prices</label>
+            <select id="qPrices"><option value="retail">Retail (sell)</option><option value="cost">Cost</option></select>
+          </div>
+        </div>
+        <div class="field"><label>Notes / terms</label><input id="qNotes" placeholder="Prices valid for 30 days. E&amp;OE." /></div>
+        <div class="hint">Opens a print-ready page in a new tab.</div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="quoteCancel">Cancel</button>
+        <button class="btn primary" id="quoteGen">Open quote</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ NEW MODALS ═══════ -->
+
+  <!-- FEATURE 1: PDF Export -->
+  <div class="modal-back" id="modalExportPDF">
+    <div class="modal" style="width:340px">
+      <h2>Export plan to PDF</h2>
+      <div class="body">
+        <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+          <input type="checkbox" id="pdfOptBg" checked> Include background image
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+          <input type="checkbox" id="pdfOptSym" checked> Include symbols / devices
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+          <input type="checkbox" id="pdfOptLines" checked> Include lines / cable runs
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+          <input type="checkbox" id="pdfOptSymRef" checked> Include symbol reference table
+        </label>
+        <p style="color:var(--muted);font-size:12px;margin:8px 0 0">Symbol reference shows symbols on visible layers. Layer legend always appended.</p>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="pdfExportCancel">Cancel</button>
+        <button class="btn primary" id="pdfExportGo">Export PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FEATURE 2: Manual takeoff item -->
+  <div class="modal-back" id="modalManualItem">
+    <div class="modal" style="width:420px">
+      <h2>Add manual takeoff item</h2>
+      <div class="body">
+        <input type="hidden" id="miEditId" />
+        <div class="field"><label>Description</label><input id="miDesc" placeholder="e.g. Site supervision, testing, contingency" /></div>
+        <div class="grid2">
+          <div class="field"><label>Quantity</label><input id="miQty" type="number" step="any" placeholder="1" /></div>
+          <div class="field"><label>Unit</label><input id="miUnit" placeholder="ea / m / h" /></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Cost price (per unit)</label><input id="miCost" type="number" step="any" placeholder="0.00" /></div>
+          <div class="field"><label>Retail price (per unit)</label><input id="miRetail" type="number" step="any" placeholder="0.00" /></div>
+        </div>
+        <div class="field"><label>Labour hours (total)</label><input id="miLabour" type="number" step="any" placeholder="0" /></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="manualItemCancel">Cancel</button>
+        <button class="btn primary" id="manualItemSave">Save item</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FEATURE 6: Packaged parts -->
+  <div class="modal-back" id="modalPackage">
+    <div class="modal" style="width:640px">
+      <h2>Create packaged part</h2>
+      <div class="body">
+        <div class="grid2">
+          <div class="field">
+            <label>Package name / description</label>
+            <input id="pkgName" placeholder="e.g. Main switchboard, Distribution board" />
+          </div>
+          <div class="field">
+            <label>Part number (auto-generated if blank)</label>
+            <input id="pkgPartNo" placeholder="e.g. DB-6WAY" />
+          </div>
+        </div>
+
+        <!-- Search DB for components -->
+        <div class="field" style="margin-bottom:4px">
+          <label>Search parts database to add components</label>
+          <input id="pkgSearch" placeholder="Type part number or description…" autocomplete="off" />
+        </div>
+        <div id="pkgSearchResults" style="max-height:140px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px;background:var(--panel-2);display:block"></div>
+
+        <p style="color:var(--muted);font-size:12px;margin:4px 0">
+          Components — not shown on plan; appear in quote &amp; BOM:
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 2fr 60px 80px 80px 28px;gap:4px;margin-bottom:4px;padding:0 2px">
+          <span style="font-size:11px;color:var(--muted)">Part No.</span>
+          <span style="font-size:11px;color:var(--muted)">Description</span>
+          <span style="font-size:11px;color:var(--muted)">Qty</span>
+          <span style="font-size:11px;color:var(--muted)">Cost ea.</span>
+          <span style="font-size:11px;color:var(--muted)">Retail ea.</span>
+          <span></span>
+        </div>
+        <div id="pkgComponentList" style="max-height:200px;overflow-y:auto"></div>
+        <button class="btn ghost" id="pkgAddComponent" style="width:100%;justify-content:center;margin-top:6px">&#65291; Add row manually</button>
+        <div style="display:flex;gap:24px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+          <span style="color:var(--muted);font-size:12px">Total cost: <strong id="pkgTotalCost" style="color:var(--text)">$0.00</strong></span>
+          <span style="color:var(--muted);font-size:12px">Total retail: <strong id="pkgTotalRetail" style="color:var(--text)">$0.00</strong></span>
+        </div>
+        <div id="pkgMsg" style="color:#f87171;font-size:12px;margin-top:4px"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="pkgModalCancel">Cancel</button>
+        <button class="btn primary" id="pkgModalSave">Save package</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename layer modal -->
+  <div class="modal-back" id="modalRenameLayer">
+    <div class="modal" style="width:340px">
+      <h2>Rename layer</h2>
+      <div class="body">
+        <div class="field">
+          <label>Layer name</label>
+          <input id="renameLayerInput" placeholder="e.g. Power, Data, Lighting" />
+        </div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" onclick="closeModal('modalRenameLayer')">Cancel</button>
+        <button class="btn primary" id="renameLayerSave">Rename</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DXF import hidden input -->
+  <input type="file" id="dxfFileInput" accept=".dxf,.dwg" hidden />
+
+  <!-- IMPORT PARTS modal -->
+  <div class="modal-back" id="modalImportParts">
+    <div class="modal" style="width:480px">
+      <h2>Import parts from CSV</h2>
+      <div class="body">
+        <p style="color:var(--muted);font-size:12px;margin:0 0 10px">
+          Upload an SM8 / CSV export file. Columns needed: <strong>Item Number, Name, Purchase Cost, Price</strong>.<br>
+          New parts are added; existing parts have cost &amp; sell price updated.
+        </p>
+        <div class="field">
+          <label>CSV file</label>
+          <input type="file" id="importPartsFile" accept=".csv,.txt" />
+        </div>
+        <div id="importPartsProgress" style="display:none;margin-top:10px">
+          <div style="background:var(--bg-alt);border-radius:6px;height:8px;overflow:hidden;margin-bottom:8px">
+            <div id="importPartsBar" style="height:100%;background:var(--accent,#ffb02e);width:0%;transition:width .3s"></div>
+          </div>
+          <div id="importPartsStatus" style="font-size:12px;color:var(--muted)">Preparing…</div>
+        </div>
+        <div id="importPartsResult" style="margin-top:8px;font-size:13px"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="importPartsCancel">Close</button>
+        <button class="btn primary" id="importPartsGo">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PARTS EDITOR modal (Task 5) -->
+  <div class="modal-back" id="modalPartsEditor">
+    <div class="modal" style="width:820px;max-width:95vw">
+      <h2>Parts database editor</h2>
+      <div class="body" style="padding:0">
+        <div style="display:flex;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border)">
+          <input id="peSearch" placeholder="Search parts…" style="flex:1;padding:6px 10px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:13px" />
+          <button class="btn" id="peAddRow" style="white-space:nowrap">&#65291; New part</button>
+        </div>
+        <div style="overflow-y:auto;max-height:55vh">
+          <table style="width:100%;border-collapse:collapse;font-size:12px" id="peTable">
+            <thead>
+              <tr style="background:var(--panel-2)">
+                <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Part No.</th>
+                <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Description</th>
+                <th style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Cost</th>
+                <th style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Retail</th>
+                <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Category</th>
+                <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Unit</th>
+                <th style="padding:7px 4px;border-bottom:1px solid var(--border)"></th>
+              </tr>
+            </thead>
+            <tbody id="peTableBody"></tbody>
+          </table>
+          <div id="peEmpty" style="display:none;padding:16px;text-align:center;color:var(--faint);font-size:13px">No parts found.</div>
+        </div>
+        <div id="peMsg" style="padding:6px 16px;font-size:12px;min-height:22px"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="peClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    (function () {
+      function loadOne(urls, i, ok, fail) {
+        if (i >= urls.length) { fail(); return; }
+        var s = document.createElement("script");
+        s.src = urls[i];
+        s.onload = function () { ok(urls[i]); };
+        s.onerror = function () { s.parentNode && s.parentNode.removeChild(s); loadOne(urls, i + 1, ok, fail); };
+        document.head.appendChild(s);
+      }
+      function load(urls) { return new Promise(function (res, rej) { loadOne(urls, 0, res, rej); }); }
+
+      var KONVA = [
+        "/vendor/konva.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/konva/9.2.0/konva.min.js",
+        "https://cdn.jsdelivr.net/npm/konva@9.2.0/konva.min.js",
+        "https://unpkg.com/konva@9.2.0/konva.min.js"
+      ];
+      var PDF_PAIRS = [
+        ["/vendor/pdf.min.js",    "/vendor/pdf.worker.min.js"],
+        ["https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js",    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"],
+        ["https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js", "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js"]
+      ];
+      var JSPDF = [
+        "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+        "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"
+      ];
+
+      function loadPdfJs() {
+        return new Promise(function (res) {
+          (function tryPair(i) {
+            if (i >= PDF_PAIRS.length) { res(false); return; }
+            var s = document.createElement("script");
+            s.src = PDF_PAIRS[i][0];
+            s.onload = function () { window.__PDF_WORKER__ = PDF_PAIRS[i][1]; res(true); };
+            s.onerror = function () { s.parentNode && s.parentNode.removeChild(s); tryPair(i + 1); };
+            document.head.appendChild(s);
+          })(0);
+        });
+      }
+      function loadJsPDF() {
+        return new Promise(function (res) {
+          (function tryUrl(i) {
+            if (i >= JSPDF.length) { res(false); return; }
+            var s = document.createElement("script");
+            s.src = JSPDF[i];
+            s.onload = function () { res(true); };
+            s.onerror = function () { s.parentNode && s.parentNode.removeChild(s); tryUrl(i + 1); };
+            document.head.appendChild(s);
+          })(0);
+        });
+      }
+      function banner(msg) {
+        var d = document.createElement("div");
+        d.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(14,18,25,0.97);color:#e7edf5;font-family:system-ui,sans-serif;padding:30px;text-align:center";
+        d.innerHTML = "<div style='max-width:560px'><h2 style='color:#ffb02e;margin:0 0 8px'>Couldn't load required libraries</h2><p>" + msg +
+          "</p><p style='color:#8a98ab;font-size:13px'>Run <code style='color:#38bdf8'>python3 fetch_vendor.py</code> to download libraries locally, then reload.</p></div>";
+        document.body.appendChild(d);
+      }
+
+      // Wire the DXF import button after everything loads
+      function wireDxfImport() {
+        var btn = document.getElementById("btnImportDxf");
+        var inp = document.getElementById("dxfFileInput");
+        if (btn && inp) {
+          btn.onclick = function () { inp.click(); };
+          inp.onchange = function () {
+            if (inp.files[0] && typeof importDxfSymbol === "function") {
+              importDxfSymbol(inp.files[0]);
+              inp.value = "";
+            }
+          };
+        }
+      }
+
+      load(KONVA)
+        .then(function () { return Promise.all([loadPdfJs(), loadJsPDF()]); })
+        .then(function ()  { return load(["/js/symbols.js"]); })
+        .then(function ()  { return load(["/js/app.js"]); })
+        .then(function ()  { return load(["/js/voltageDrop.js"]); })
+        .then(function ()  { wireDxfImport(); })
+        .catch(function (e) { banner((e && e.message) ? e.message : "Konva could not be loaded."); });
+    })();
+  </script>
+</body>
+</html>

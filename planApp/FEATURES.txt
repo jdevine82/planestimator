@@ -1,0 +1,175 @@
+PLANAPP - 6 INTEGRATED FEATURES
+================================
+
+FEATURE 1: EXPORT MARKED-UP PLANS TO PDF
+=========================================
+Export your marked-up plan with all symbols, lines, and layers as PDF.
+
+How to use:
+1. Mark up your plan (add symbols, draw lines)
+2. Click "📄 PDF" button in header
+3. Choose what to include:
+   - Background image (original plan)
+   - Symbols (devices you placed)
+   - Lines (cable runs you drew)
+4. Click "Export"
+5. PDF downloads with all markup
+
+In code:
+  exportPlantoPDF({
+    bg: true,      // include background
+    symbols: true, // include symbols
+    lines: true    // include lines
+  });
+
+---
+
+FEATURE 2: ADD MANUAL ITEMS TO TAKEOFF
+======================================
+Add items that aren't on the plan (supervision, testing, contingency, etc).
+
+How to use:
+1. Click "Parts Library" tab on right
+2. Click "➕ Add manual item"
+3. Enter:
+   - Description (e.g. "Site supervision")
+   - Quantity (e.g. 20)
+   - Unit (e.g. "hours", "ea", "m")
+   - Cost price (per unit)
+   - Retail price (per unit)
+   - Labour hours (optional)
+4. Click "Add Item"
+5. Item appears in takeoff under "Manual Items"
+
+In code:
+  addManualItem(
+    "Site supervision",  // description
+    20,                  // quantity
+    "hours",            // unit
+    50,                 // cost per unit
+    85,                 // retail per unit
+    0                   // labour hours
+  );
+
+Remove item:
+  removeManualItem("item_id");
+
+---
+
+FEATURE 3: EDIT LAYER NAMES
+===========================
+Rename layers to be clearer (e.g. "Layer1" → "Mains Power").
+
+How to use:
+Open browser console (F12) and type:
+  editLayerName("layer_id", "New Name");
+
+Example:
+  editLayerName("layer_abc123", "Data Cabling");
+
+The layer name updates everywhere:
+- In the left panel
+- In the takeoff
+- In the PDF legend
+
+---
+
+FEATURE 4: ADD SYMBOLS TO SPECIFIC LAYERS
+==========================================
+Assign symbols to layers for better organization.
+
+How to use:
+Open browser console (F12) and type:
+  assignSymbolToLayer("symbol_type", "layer_id");
+
+Example:
+  assignSymbolToLayer("gpo_single", "layer_power");
+
+This helps track which devices are part of which cable run.
+
+---
+
+FEATURE 5: CUSTOM SYMBOLS & DWG IMPORT
+======================================
+Add your own symbol graphics or import from DWG libraries.
+
+How to use:
+1. Click "+" button in Symbols panel
+2. Enter symbol name
+3. Choose category
+4. Upload image (PNG/SVG recommended)
+5. Click "Add symbol"
+6. Symbol appears in palette
+
+For DWG files:
+1. Convert DWG to PNG/SVG using:
+   - Online: cloudconvert.com, zamzar.com
+   - Desktop: LibreCAD (free), AutoCAD (paid)
+2. Upload the converted image as custom symbol
+
+In code (advanced):
+  importSymbolImage(
+    "Variable Frequency Drive",  // name
+    "electrical",                // category
+    "data:image/png;base64,..."  // image data
+  );
+
+---
+
+FEATURE 6: PACKAGED PARTS
+=========================
+Create multi-component assemblies under one symbol.
+
+Example: A switchboard package containing:
+- 1× Distribution board unit ($150)
+- 6× RCDs ($24 each = $144)
+- 3× MCBs ($12 each = $36)
+- 1× Busbar assembly ($45)
+- 10× Terminal blocks ($2 each = $20)
+= Total package: $395
+
+How to use:
+Open browser console (F12) and type:
+  var components = [
+    { part: part_obj_1, qty: 1 },
+    { part: part_obj_2, qty: 6 },
+    { part: part_obj_3, qty: 3 },
+    // ... more components
+  ];
+  
+  createPackagedPart(
+    "Distribution Board",
+    "6-way board with RCDs and MCBs",
+    components
+  );
+
+The package:
+- Acts as a single item in takeoff
+- Shows total cost ($395 in example)
+- Shows full component breakdown in quote
+- Can be reused across projects
+
+Get all packages:
+  var packages = getPackagedParts();
+
+---
+
+USAGE SUMMARY
+=============
+
+BUTTONS (in UI):
+- "📄 PDF" button → Export to PDF
+- "➕ Add manual item" → Add manual takeoff item
+
+CONSOLE COMMANDS (F12):
+- exportPlantoPDF({bg, symbols, lines})
+- addManualItem(desc, qty, unit, cost, retail, labour)
+- removeManualItem(id)
+- editLayerName(layerId, newName)
+- assignSymbolToLayer(symbolType, layerId)
+- importSymbolImage(name, category, imageData)
+- createPackagedPart(name, description, components)
+- getPackagedParts()
+
+ALL 6 FEATURES FULLY INTEGRATED!
+=================================

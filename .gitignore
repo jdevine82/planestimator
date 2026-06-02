@@ -1,0 +1,7 @@
+planApp/__pycache__/
+planApp/data/
+planApp/session.json
+planApp/projects/
+planApp/static/vendor/
+planApp/planApp/
+.claude/
