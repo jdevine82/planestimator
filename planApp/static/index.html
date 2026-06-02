@@ -346,6 +346,21 @@
     </div>
   </div>
 
+  <div class="modal-back" id="modalRestoreSymbols">
+    <div class="modal" style="width:440px">
+      <h2>Missing symbols restored</h2>
+      <div class="body">
+        <p style="color:var(--faint);font-size:13px;margin:0 0 12px">These symbols are used in this project but are no longer in the library. They have been recovered from the project backup.</p>
+        <div id="restoreSymbolsList" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;margin-bottom:12px"></div>
+        <p style="color:var(--faint);font-size:12px;margin:0"><strong style="color:var(--text)">Save to library</strong> makes them available in all projects. <strong style="color:var(--text)">This project only</strong> keeps them for this session but they won't appear in new projects.</p>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="restoreSymProjOnly">This project only</button>
+        <button class="btn primary" id="restoreSymToLib">Save to library</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-back" id="modalPart">
     <div class="modal" style="width:460px">
       <h2 id="partTitle">Add custom part</h2>

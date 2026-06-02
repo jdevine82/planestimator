@@ -1696,6 +1696,13 @@
   }
   function saveProject() {
     state.name = $("projName").value.trim() || "Untitled";
+    // Snapshot every custom symbol actually placed on any sheet so they can be
+    // restored if the DB entry is later deleted
+    var usedIds = {};
+    (state.sheets || []).forEach(function (sh) {
+      (sh.symbols || []).forEach(function (s) { usedIds[s.type] = true; });
+    });
+    state.usedSymbols = (state.customSymbols || []).filter(function (s) { return usedIds[s.id]; });
     fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: state.name, data: state }) })
       .then(function (r) { return r.json(); })
@@ -1736,11 +1743,33 @@
       });
     }).catch(function (e) { box.innerHTML = '<p class="unlinked">' + escapeHtml(e.message) + "</p>"; });
   }
+  var _pendingRestoreCheck = [];
+
+  function _showSymbolRestoreDialog(missing) {
+    var list = $("restoreSymbolsList");
+    list.innerHTML = missing.map(function (s) {
+      return '<div style="display:flex;align-items:center;gap:8px;padding:4px 6px;background:var(--bg-alt);border-radius:5px">' +
+        '<img src="' + s.dataURL + '" style="width:28px;height:28px;border-radius:4px;object-fit:contain;background:var(--panel-2,#1a2535)">' +
+        '<span style="font-size:13px">' + escapeHtml(s.name) + '</span>' +
+        '<span style="font-size:11px;color:var(--faint);margin-left:auto">' + (s.category || "custom") + '</span>' +
+        '</div>';
+    }).join("");
+    $("restoreSymToLib").onclick = function () {
+      missing.forEach(function (sym) {
+        fetch("/api/symbols", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sym) }).catch(function () {});
+      });
+      closeModal("modalRestoreSymbols");
+      toast(missing.length + " symbol" + (missing.length > 1 ? "s" : "") + " saved to library");
+    };
+    $("restoreSymProjOnly").onclick = function () { closeModal("modalRestoreSymbols"); };
+    openModal("modalRestoreSymbols");
+  }
+
   // Fetch global symbols from DB and merge into state.customSymbols
   function mergeDbSymbols() {
     fetch("/api/symbols").then(function (r) { return r.json(); }).then(function (data) {
       var syms = data.symbols || [];
-      if (!syms.length) return;
       state.customSymbols = state.customSymbols || [];
       syms.forEach(function (sym) {
         var idx = state.customSymbols.findIndex(function (s) { return s.id === sym.id; });
@@ -1748,7 +1777,15 @@
         else { state.customSymbols[idx] = sym; delete symbolImages[sym.id]; ensureSymbolImage(sym.id); }
       });
       renderPalette();
-    }).catch(function () {});
+      // Check if any backup-restored symbols are absent from the DB
+      if (_pendingRestoreCheck.length) {
+        var dbIds = {};
+        syms.forEach(function (s) { dbIds[s.id] = true; });
+        var missing = _pendingRestoreCheck.filter(function (s) { return !dbIds[s.id]; });
+        _pendingRestoreCheck = [];
+        if (missing.length) _showSymbolRestoreDialog(missing);
+      }
+    }).catch(function () { _pendingRestoreCheck = []; });
   }
   window.mergeDbSymbols = mergeDbSymbols;
 
@@ -1778,6 +1815,15 @@
       state = Object.assign(newState(), j.data || {});
       state.symbolTypes = state.symbolTypes || {}; state.layers = state.layers || []; state.sheets = state.sheets || [];
       state.customSymbols = state.customSymbols || []; state.customParts = state.customParts || [];
+      // Restore any used symbols missing from customSymbols (e.g. deleted from DB after save)
+      // _pendingRestoreCheck holds ALL usedSymbols; mergeDbSymbols will filter to those absent from DB
+      _pendingRestoreCheck = [];
+      (state.usedSymbols || []).forEach(function (sym) {
+        if (!state.customSymbols.find(function (s) { return s.id === sym.id; })) {
+          state.customSymbols.push(sym);
+        }
+        _pendingRestoreCheck.push(sym);
+      });
       state.quoteInfo = state.quoteInfo || newState().quoteInfo;
       state.circuits  = state.circuits  || [];
       state.labelScale = state.labelScale != null ? state.labelScale : 0.4;
@@ -2412,7 +2458,7 @@
       else if (e.key === "t" || e.key === "T") setTool("text");
       else if (e.key === "m" || e.key === "M") setTool("measure");
       else if (e.key === "Enter" && (tool === "line" || tool === "route") && draftPoints) finishCurrent();
-      else if (e.key === "Escape") { cancelDraft(); deselect(); ["modalScale", "modalSettings", "modalOpen", "modalAssign", "modalSymbol", "modalPart", "modalQuote", "modalExportPDF", "modalManualItem", "modalPackage", "modalRenameLayer"].forEach(closeModal); }
+      else if (e.key === "Escape") { cancelDraft(); deselect(); ["modalScale", "modalSettings", "modalOpen", "modalAssign", "modalSymbol", "modalPart", "modalQuote", "modalExportPDF", "modalManualItem", "modalPackage", "modalRenameLayer", "modalRestoreSymbols"].forEach(closeModal); }
       else if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
       else if (e.key === " " && stage) { spaceDown = true; stage.draggable(true); stage.container().style.cursor = "grab"; }
     });
