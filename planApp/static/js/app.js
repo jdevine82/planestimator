@@ -315,7 +315,7 @@
   function restrokeForZoom() {
     var k = 1 / stage.scaleX();
     Object.values(lineNodes).forEach(function (n) { n.line.strokeWidth((selected && selected.id === n.line._lineId ? 5.4 : 3) * k); });
-    Object.values(routeNodes).forEach(function (n) { n.strokeWidth((selected && selected.id === n._routeId ? 4 : 2) * k); });
+    Object.values(routeNodes).forEach(function (n) { if (n._useWorldWidth) return; n.strokeWidth((selected && selected.id === n._routeId ? 4 : 2) * k); });
     if (calNodes) {
       calNodes.line.strokeWidth(2 * k); calNodes.line.dash([10 * k, 6 * k]);
       calNodes.h1.radius(7 * k); calNodes.h2.radius(7 * k);
@@ -750,7 +750,7 @@
     pushUndo();
     if (!sheet().routes) sheet().routes = [];
     var route = { id: uid("rte"), layerId: state.activeLayerId, points: draftPoints.slice(),
-      description: "", stickLengthM: 4,
+      description: "", stickLengthM: 4, lineWidthM: 0,
       straightPkgId: null, cornerPkgId: null, teePkgId: null,
       teeCount: 0, cornerCountOverride: null, lengthM: null };
     recalcRoute(route);
@@ -762,13 +762,24 @@
   }
   function routeAutoCorners(route) { return Math.max(0, Math.floor(route.points.length / 2) - 2); }
   window.recalcRoute = recalcRoute;
+  window.updateRouteWidth = function (routeId, lineWidthM) {
+    var rn = routeNodes[routeId]; if (!rn) return;
+    var mpp = mppOf(sheet());
+    var worldW = (lineWidthM > 0 && mpp) ? lineWidthM / mpp : 0;
+    rn._lineWidthM = lineWidthM; rn._useWorldWidth = worldW > 0;
+    rn.strokeWidth(worldW > 0 ? worldW : 2 / stage.scaleX());
+    shapeLayer.batchDraw();
+  };
   function renderRoute(route) {
     var lay = layerById(route.layerId) || { color: "#38bdf8", visible: true };
     var k = 1 / stage.scaleX();
-    var kl = new Konva.Line({ points: route.points.slice(), stroke: lay.color, strokeWidth: 2 * k,
-      lineCap: "round", lineJoin: "round", hitStrokeWidth: 12,
+    var mpp = mppOf(sheet());
+    var worldW = (route.lineWidthM > 0 && mpp) ? route.lineWidthM / mpp : 0;
+    var initSW = worldW > 0 ? worldW : 2 * k;
+    var kl = new Konva.Line({ points: route.points.slice(), stroke: lay.color, strokeWidth: initSW,
+      lineCap: "round", lineJoin: "round", hitStrokeWidth: Math.max(12 * k, initSW + 4 * k),
       draggable: false, visible: lay.visible !== false });
-    kl._routeId = route.id; kl._isRoute = true;
+    kl._routeId = route.id; kl._isRoute = true; kl._lineWidthM = route.lineWidthM || 0; kl._useWorldWidth = worldW > 0;
     kl.on("click tap", function (e) { if (tool === "select") { e.cancelBubble = true; select("route", route.id); } });
     routeNodes[route.id] = kl; shapeLayer.add(kl);
     liftUnassignedSymbols();
@@ -905,7 +916,8 @@
       var ln = lineNodes[id].line; ln.strokeWidth(5.4 / stage.scaleX()); ln.shadowColor("#fff"); ln.shadowBlur(8);
       if (transformer) transformer.nodes([]);
     } else if (kind === "route") {
-      var rn = routeNodes[id]; rn.strokeWidth(4 / stage.scaleX()); rn.shadowColor("#38bdf8"); rn.shadowBlur(8);
+      var rn = routeNodes[id]; rn.shadowColor("#38bdf8"); rn.shadowBlur(10);
+      if (!rn._useWorldWidth) rn.strokeWidth(4 / stage.scaleX());
       if (transformer) transformer.nodes([]);
       var _rsh = sheet(), _robj = _rsh && (_rsh.routes || []).find(function (r) { return r.id === id; });
       if (_robj) { switchTab("properties"); window._appSelectedRoute = _robj; if (window.renderRouteProperties) window.renderRouteProperties(_robj); }
@@ -923,7 +935,7 @@
       symbolNodes[selected.id].scaleX(1); symbolNodes[selected.id].scaleY(1);
     }
     else if (selected.kind === "line"   && lineNodes[selected.id])  { var ln = lineNodes[selected.id].line; ln.shadowBlur(0); ln.strokeWidth(3 / stage.scaleX()); }
-    else if (selected.kind === "route"  && routeNodes[selected.id]) { routeNodes[selected.id].shadowBlur(0); routeNodes[selected.id].strokeWidth(2 / stage.scaleX()); }
+    else if (selected.kind === "route"  && routeNodes[selected.id]) { var _rnd = routeNodes[selected.id]; _rnd.shadowBlur(0); if (!_rnd._useWorldWidth) _rnd.strokeWidth(2 / stage.scaleX()); }
     else if (selected.kind === "textAnnot" && textNodes[selected.id]) textNodes[selected.id].shadowBlur(0);
     selected = null; shapeLayer.batchDraw();
   }
@@ -3105,6 +3117,44 @@
     });
   };
 
+  // ── Route BOM rows into takeoffRows() so generateQuote() picks them up ──
+  var _prevTakeoffRowsRoutes = takeoffRows;
+  takeoffRows = function () {
+    var data = _prevTakeoffRowsRoutes();
+    if (!state) return data;
+    function findPart(id) { return id ? (state.customParts || []).find(function (p) { return p.part_no === id; }) : null; }
+    var routeRows = [];
+    (state.sheets || []).forEach(function (sh) {
+      (sh.routes || []).forEach(function (route) {
+        if (!route.straightPkgId && !route.cornerPkgId && !route.teePkgId) return;
+        var lengthM = route.lengthM || 0;
+        var stickCount = lengthM > 0 ? Math.ceil(lengthM / (route.stickLengthM || 4)) : 0;
+        var autoC = window.routeAutoCorners ? window.routeAutoCorners(route) : Math.max(0, Math.floor(route.points.length / 2) - 2);
+        var cornerCount = (route.cornerCountOverride != null) ? route.cornerCountOverride : autoC;
+        var teeCount = route.teeCount || 0;
+        var label = route.description || "Route";
+        function expandInto(part, qty, slot) {
+          if (!part || qty <= 0) return;
+          var items = part.isPackage && part.components && part.components.length
+            ? part.components.map(function (c) { return { part: c, qty: qty * (c.qty || 1) }; })
+            : [{ part: part, qty: qty }];
+          items.forEach(function (item) {
+            routeRows.push({ kind: "route-bom", id: route.id + "_" + slot + "_" + item.part.part_no,
+              name: label + " [" + slot + "]", part: item.part, unit: item.part.unit || "ea",
+              autoQty: item.qty, effQty: item.qty, qtyOv: false,
+              autoHrs: 0, effHrs: 0, hrsOv: false,
+              matCost: item.qty * (item.part.cost || 0), matRetail: item.qty * (item.part.retail || 0),
+              labour: 0, meta: "" });
+          });
+        }
+        expandInto(findPart(route.straightPkgId), stickCount,  "straight");
+        expandInto(findPart(route.cornerPkgId),   cornerCount, "corner");
+        expandInto(findPart(route.teePkgId),       teeCount,   "tee");
+      });
+    });
+    return { rows: data.rows.concat(routeRows), rate: data.rate };
+  };
+
   // ── Route takeoff section ─────────────────────────────────────────
   var _origRefreshTakeoffRoutes = refreshTakeoff;
   refreshTakeoff = function () {
@@ -3113,9 +3163,7 @@
   };
   function renderRouteTakeoffRows() {
     if (!state) return;
-    var rate    = state.labourRate || 0;
-    var tbody   = $("tab-takeoff") && $("tab-takeoff").querySelector("tbody");
-    var tfoot   = $("tab-takeoff") && $("tab-takeoff").querySelector("tfoot");
+    var tbody = $("tab-takeoff") && $("tab-takeoff").querySelector("tbody");
     if (!tbody) return;
 
     // Collect all routes across all sheets
@@ -3135,7 +3183,6 @@
       return (state.customParts || []).find(function (p) { return p.part_no === id; });
     }
 
-    var extraCost = 0, extraRetail = 0;
     var html = '<tr class="group-head"><td colspan="6">Routes &amp; Conduit</td></tr>';
 
     routesWithData.forEach(function (route) {
@@ -3167,7 +3214,6 @@
           : [{ desc: part.description, pno: part.part_no, unit: part.unit || "ea", cost: part.cost || 0, retail: part.retail || 0, qty: qty }];
         rows.forEach(function (r) {
           var mc = r.qty * r.cost, mr = r.qty * r.retail;
-          extraCost += mc; extraRetail += mr;
           html += '<tr><td style="padding-left:18px;font-size:11px">└ <span style="color:var(--faint);font-size:10px">[' + escapeHtml(slotLabel) + ']</span> ' +
             escapeHtml(r.desc) + ' <span style="color:var(--faint);font-size:10px">[' + escapeHtml(r.pno) + ']</span>' +
             '</td><td class="num">' + r.qty + ' ' + escapeHtml(r.unit) +
@@ -3183,16 +3229,7 @@
     });
 
     tbody.insertAdjacentHTML("beforeend", html);
-
-    if (tfoot && (extraCost || extraRetail)) {
-      var cells = tfoot.querySelectorAll("td");
-      if (cells.length >= 4) {
-        var oc = parseFloat(cells[2].textContent.replace(/[^0-9.]/g, "")) || 0;
-        var or = parseFloat(cells[3].textContent.replace(/[^0-9.]/g, "")) || 0;
-        cells[2].textContent = fmt$(oc + extraCost);
-        cells[3].textContent = fmt$(or + extraRetail);
-      }
-    }
+    // Totals are already included via takeoffRows() patch — no manual tfoot update needed.
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
@@ -3829,6 +3866,7 @@
       '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">Route / Conduit</div>' +
       statsHtml(s0) +
       field("Description", "rte-desc", route.description || "", "text", "e.g. 100mm Cable Tray") +
+      field("Width (mm, 0 = thin line)", "rte-lw", route.lineWidthM > 0 ? Math.round(route.lineWidthM * 1000) : 0, "number", "0", ' step="10" min="0" max="2000"') +
       field("Stick / section length (m)", "rte-stick", route.stickLengthM || 4, "number", "4.0", ' step="0.1" min="0.1"') +
       '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
         '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Fittings</div>' +
@@ -3862,6 +3900,10 @@
     }
     wireField("rte-desc", "description");
     wireField("rte-stick", "stickLengthM", function (v) { return parseFloat(v) || 4; });
+    var lwEl = $("rte-lw"); if (lwEl) { lwEl.onchange = function () {
+      var mm = Math.max(0, parseFloat(lwEl.value) || 0); route.lineWidthM = mm / 1000;
+      if (window.updateRouteWidth) window.updateRouteWidth(route.id, route.lineWidthM);
+    }; }
     wireField("rte-corners", "cornerCountOverride", function (v) { var t = v.trim(); return t === "" ? null : Math.max(0, parseInt(t) || 0); });
     wireField("rte-tees", "teeCount", function (v) { return Math.max(0, parseInt(v) || 0); });
 
