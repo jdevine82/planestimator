@@ -259,26 +259,84 @@
   </div>
 
   <div class="modal-back" id="modalSymbol">
-    <div class="modal" style="width:440px">
+    <div class="modal" style="width:540px">
       <h2 id="symbolModalTitle">Add custom symbol</h2>
       <div class="body">
         <input type="hidden" id="symEditId" />
-        <div class="field"><label>Name</label><input id="symName" placeholder="e.g. Emergency light" /></div>
-        <div class="field"><label>Category</label>
-          <select id="symCat">
-            <option value="electrical">Electrical</option>
-            <option value="data">Data / Comms</option>
-            <option value="mechanical">Mechanical</option>
-            <option value="custom">Custom</option>
-          </select>
+        <div style="display:flex;gap:10px">
+          <div class="field" style="flex:1"><label>Name</label><input id="symName" placeholder="e.g. Duct outlet" /></div>
+          <div class="field" style="flex:0 0 150px"><label>Category</label>
+            <select id="symCat">
+              <option value="electrical">Electrical</option>
+              <option value="data">Data / Comms</option>
+              <option value="hvac">HVAC</option>
+              <option value="mechanical">Mechanical</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
         </div>
-        <div class="field" id="symImgField">
-          <label>Icon image — PNG, SVG or JPG (optional)</label>
-          <input id="symImg" type="file" accept="image/*,.svg" />
-          <div class="hint">Leave blank to keep the current image, or upload a new one to replace it.</div>
+        <!-- Tab bar -->
+        <div style="display:flex;border-bottom:1px solid var(--border);margin-bottom:12px">
+          <button id="symTabUpload" style="padding:6px 14px;background:none;border:none;border-bottom:2px solid var(--accent,#ffb02e);color:var(--text);font-size:13px;cursor:pointer;font-weight:600">Upload Image</button>
+          <button id="symTabDraw"   style="padding:6px 14px;background:none;border:none;border-bottom:2px solid transparent;color:var(--faint);font-size:13px;cursor:pointer">Draw Shape</button>
         </div>
-        <div id="symPreview" style="margin-top:6px"></div>
-        <div id="symbolMsg"></div>
+        <!-- Upload panel -->
+        <div id="symPanelUpload">
+          <div class="field" id="symImgField">
+            <label>Icon image — PNG, SVG or JPG (optional)</label>
+            <input id="symImg" type="file" accept="image/*,.svg" />
+            <div class="hint" id="symImgHint">Leave blank and a labelled badge is auto-generated.</div>
+          </div>
+          <div id="symPreview" style="margin-top:6px"></div>
+        </div>
+        <!-- Draw panel -->
+        <div id="symPanelDraw" style="display:none">
+          <!-- tool row -->
+          <div style="display:flex;gap:5px;align-items:center;margin-bottom:8px">
+            <button class="sym-draw-tool"         data-dtool="select"  title="Move shapes" style="padding:3px 9px;font-size:15px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer">&#8599;</button>
+            <button class="sym-draw-tool active"  data-dtool="rect"    title="Rectangle"   style="padding:3px 9px;font-size:15px;background:var(--bg-alt);border:1px solid var(--accent,#ffb02e);border-radius:5px;color:var(--text);cursor:pointer">&#9633;</button>
+            <button class="sym-draw-tool"         data-dtool="ellipse" title="Ellipse"     style="padding:3px 9px;font-size:15px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer">&#9711;</button>
+            <button class="sym-draw-tool"         data-dtool="line"    title="Line"        style="padding:3px 9px;font-size:15px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer">&#8212;</button>
+            <button class="sym-draw-tool"         data-dtool="text"    title="Text"        style="padding:3px 9px;font-size:15px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer;font-weight:700">T</button>
+            <div style="flex:1"></div>
+            <button id="symDrawUndo"  title="Undo last shape"  style="padding:3px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer;font-size:13px">&#8617;</button>
+            <button id="symDrawClear" title="Clear canvas"     style="padding:3px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--red,#f87171);cursor:pointer;font-size:13px">&#10005;</button>
+          </div>
+          <!-- style row -->
+          <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;font-size:12px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:4px;color:var(--text)">Stroke
+              <input type="color" id="symDrawStroke" value="#38bdf8" style="width:30px;height:22px;padding:1px 2px;border:1px solid var(--border);border-radius:4px;background:var(--bg-alt);cursor:pointer">
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;color:var(--text)">Fill
+              <input type="color" id="symDrawFill" value="#1e3a4a" style="width:30px;height:22px;padding:1px 2px;border:1px solid var(--border);border-radius:4px;background:var(--bg-alt);cursor:pointer">
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;color:var(--text)">
+              <input type="checkbox" id="symDrawNoFill" checked> Transparent fill
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;color:var(--text)">Width
+              <input type="range" id="symDrawSW" min="1" max="10" value="2" style="width:60px;accent-color:var(--accent,#ffb02e)">
+              <span id="symDrawSWVal" style="min-width:16px;color:var(--accent,#ffb02e)">2</span>px
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;color:var(--text)">Text size
+              <input type="range" id="symDrawTextSize" min="8" max="72" value="16" style="width:60px;accent-color:var(--accent,#ffb02e)">
+              <span id="symDrawTextSizeVal" style="min-width:20px;color:var(--accent,#ffb02e)">16</span>px
+            </label>
+          </div>
+          <!-- canvas -->
+          <canvas id="symDrawCanvas" width="492" height="240"
+            style="border:1px solid var(--border);border-radius:6px;background:repeating-conic-gradient(#2a3442 0% 25%,#1a2230 0% 50%) 0 0/16px 16px;cursor:crosshair;display:block;width:100%;box-sizing:border-box"></canvas>
+          <!-- mm dims -->
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;flex-wrap:wrap">
+            <span style="color:var(--faint)">Real-world size (optional):</span>
+            <input type="number" id="symWidthMm"  placeholder="Width mm"  min="1" step="1"
+              style="width:90px;padding:4px 6px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;color:var(--text);color-scheme:dark;font-size:12px">
+            <span style="color:var(--faint)">&#215;</span>
+            <input type="number" id="symHeightMm" placeholder="Height mm" min="1" step="1"
+              style="width:90px;padding:4px 6px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;color:var(--text);color-scheme:dark;font-size:12px">
+            <span style="color:var(--faint)">mm &mdash; auto-sizes symbol on calibrated plans</span>
+          </div>
+        </div>
+        <div id="symbolMsg" style="margin-top:6px"></div>
       </div>
       <div class="foot">
         <button class="btn ghost" id="symbolDelete" style="margin-right:auto;color:var(--red,#f87171);display:none">Delete</button>

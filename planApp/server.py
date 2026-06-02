@@ -348,20 +348,39 @@ def _sym_con():
         "CREATE TABLE IF NOT EXISTS symbols ("
         "id TEXT PRIMARY KEY, name TEXT, category TEXT, data_url TEXT)"
     )
+    cols = {r[1] for r in con.execute("PRAGMA table_info(symbols)").fetchall()}
+    if "width_mm"    not in cols: con.execute("ALTER TABLE symbols ADD COLUMN width_mm REAL")
+    if "height_mm"   not in cols: con.execute("ALTER TABLE symbols ADD COLUMN height_mm REAL")
+    if "shapes_json" not in cols: con.execute("ALTER TABLE symbols ADD COLUMN shapes_json TEXT")
     con.commit()
     return con
 
 def db_load_symbols():
     con = _sym_con()
-    rows = con.execute("SELECT id, name, category, data_url FROM symbols").fetchall()
-    return [{"id": r[0], "name": r[1], "category": r[2] or "custom",
-             "dataURL": r[3] or "", "custom": True} for r in rows]
+    rows = con.execute(
+        "SELECT id, name, category, data_url, width_mm, height_mm, shapes_json FROM symbols"
+    ).fetchall()
+    result = []
+    for r in rows:
+        sym = {"id": r[0], "name": r[1], "category": r[2] or "custom",
+               "dataURL": r[3] or "", "custom": True}
+        if r[4] is not None: sym["widthMm"]    = r[4]
+        if r[5] is not None: sym["heightMm"]   = r[5]
+        if r[6]:             sym["shapesJson"] = r[6]
+        result.append(sym)
+    return result
 
 def db_upsert_symbol(sym):
     con = _sym_con()
     con.execute(
-        "INSERT OR REPLACE INTO symbols (id, name, category, data_url) VALUES (?,?,?,?)",
-        [sym.get("id",""), sym.get("name",""), sym.get("category","custom"), sym.get("dataURL","")]
+        "INSERT OR REPLACE INTO symbols "
+        "(id, name, category, data_url, width_mm, height_mm, shapes_json) "
+        "VALUES (?,?,?,?,?,?,?)",
+        [sym.get("id",""), sym.get("name",""), sym.get("category","custom"),
+         sym.get("dataURL",""),
+         sym.get("widthMm")    or None,
+         sym.get("heightMm")   or None,
+         sym.get("shapesJson") or None]
     )
     con.commit()
 

@@ -109,8 +109,8 @@
     var accent = LIB.categoryColors[category] || "#ffb02e";
     var label = (name || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "?";
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">' +
-      '<rect x="2" y="2" width="40" height="40" rx="9" fill="#10151d" fill-opacity="0.9" stroke="' + accent + '" stroke-width="2.5"/>' +
-      '<text x="22" y="22" fill="#f0f4f8" font-family="IBM Plex Sans, sans-serif" font-size="13" font-weight="700" ' +
+      '<rect x="2" y="2" width="40" height="40" rx="9" fill="none" stroke="' + accent + '" stroke-width="2.5"/>' +
+      '<text x="22" y="22" fill="' + accent + '" font-family="IBM Plex Sans, sans-serif" font-size="13" font-weight="700" ' +
       'text-anchor="middle" dominant-baseline="central">' + label + "</text></svg>";
     return "data:image/svg+xml;base64," + btoa(svg);
   }
@@ -559,7 +559,18 @@
   // ------------- symbols -------------
   function addSymbol(type, x, y) {
     pushUndo();
-    var s = { id: uid("sym"), type: type, x: x, y: y, size: newSymbolSize, rotation: 0,
+    var symDef = customSymbol(type) || LIB.byId[type];
+    var sz = newSymbolSize, sw = sz, sh2 = sz;
+    if (symDef && symDef.widthMm && symDef.heightMm) {
+      var mpp = mppOf(sheet());
+      if (mpp) {
+        sw   = symDef.widthMm  / (mpp * 1000);
+        sh2  = symDef.heightMm / (mpp * 1000);
+        sz   = Math.max(sw, sh2);
+      }
+    }
+    var s = { id: uid("sym"), type: type, x: x, y: y, size: sz,
+              w: sw, h: sh2, rotation: 0,
               visibleLayerId: state.activeLayerId || null };
     sheet().symbols.push(s); renderSymbol(s); refreshTakeoff();
 
@@ -590,20 +601,19 @@
   }
   // Helper: compute label font size from symbol size using the global labelScale
   function refLabelFontSize(s) {
-    var base = s.size || 30;
+    var base = Math.max(s.w || 0, s.h || 0) || s.size || 30;
     var scale = (state && state.labelScale != null) ? state.labelScale : 0.4;
     return Math.max(6, Math.round(base * scale));
   }
   // Helper: position the label node relative to the symbol node
   function positionRefLabel(labelNode, symNode, s) {
-    var size = s.size || 30;
-    var fs   = refLabelFontSize(s);
-    // Place label centred below the symbol (offset by half icon + small gap)
-    var gap = Math.max(2, size * 0.12);
+    var h   = s.h || s.size || 30;
+    var fs  = refLabelFontSize(s);
+    var gap = Math.max(2, h * 0.12);
     labelNode.x(symNode.x());
-    labelNode.y(symNode.y() + size / 2 + gap);
+    labelNode.y(symNode.y() + h / 2 + gap);
     labelNode.fontSize(fs);
-    labelNode.offsetX(labelNode.width() / 2);  // re-centre after font change
+    labelNode.offsetX(labelNode.width() / 2);
   }
   function syncRefLabel(s) {
     var labelNode = refLabelNodes[s.id];
@@ -631,10 +641,11 @@
   }
 
   function renderSymbol(s) {
-    var size = s.size || 30;
+    var w = s.w || s.size || 30;
+    var h = s.h || s.size || 30;
     ensureSymbolImage(s.type);
-    var node = new Konva.Image({ image: symbolImages[s.type], x: s.x, y: s.y, width: size, height: size,
-      offsetX: size / 2, offsetY: size / 2, rotation: s.rotation || 0, draggable: tool === "select" });
+    var node = new Konva.Image({ image: symbolImages[s.type], x: s.x, y: s.y, width: w, height: h,
+      offsetX: w / 2, offsetY: h / 2, rotation: s.rotation || 0, draggable: tool === "select" });
     node._symId = s.id;
 
     // Ref label — sits below the icon, not rotated, always horizontal
@@ -642,7 +653,7 @@
     var _labelLayVisible = true;
     if (s.visibleLayerId) { var _ll = layerById(s.visibleLayerId); if (_ll && _ll.visible === false) _labelLayVisible = false; }
     var labelNode = new Konva.Text({
-      x: s.x, y: s.y + size / 2 + Math.max(2, size * 0.12),
+      x: s.x, y: s.y + h / 2 + Math.max(2, h * 0.12),
       text: s.refNo || "",
       fontSize: fs,
       fill: (state && state.labelColor) ? state.labelColor : "#e7edf5",
@@ -668,10 +679,12 @@
     });
     node.on("transformend", function () {
       pushUndo();
-      var ns = Math.max(8, node.width() * node.scaleX());
-      node.scaleX(1); node.scaleY(1); node.width(ns); node.height(ns);
-      node.offsetX(ns / 2); node.offsetY(ns / 2);
-      s.size = ns; s.rotation = node.rotation(); s.x = node.x(); s.y = node.y();
+      var nw = Math.max(8, node.width()  * node.scaleX());
+      var nh = Math.max(8, node.height() * node.scaleY());
+      node.scaleX(1); node.scaleY(1); node.width(nw); node.height(nh);
+      node.offsetX(nw / 2); node.offsetY(nh / 2);
+      s.w = nw; s.h = nh; s.size = Math.max(nw, nh);
+      s.rotation = node.rotation(); s.x = node.x(); s.y = node.y();
       positionRefLabel(labelNode, node, s);
       labelNode.offsetX(labelNode.width() / 2);
       shapeLayer.batchDraw();
@@ -724,7 +737,15 @@
     var node = symbolNodes[selected.id], sh = sheet();
     var s = sh.symbols.find(function (x) { return x.id === selected.id; });
     if (!node || !s) return;
-    s.size = size; node.width(size); node.height(size); node.offsetX(size / 2); node.offsetY(size / 2);
+    if (s.w && s.h && s.w !== s.h) {
+      var ratio = s.h / s.w;
+      var nw = size, nh = Math.round(size * ratio);
+      s.w = nw; s.h = nh; s.size = size;
+      node.width(nw); node.height(nh); node.offsetX(nw / 2); node.offsetY(nh / 2);
+    } else {
+      s.w = size; s.h = size; s.size = size;
+      node.width(size); node.height(size); node.offsetX(size / 2); node.offsetY(size / 2);
+    }
     syncRefLabel(s);
     shapeLayer.batchDraw();
   }
@@ -1144,7 +1165,7 @@
         '</p>';
       return;
     }
-    [["electrical", "Electrical"], ["data", "Data / Comms"], ["mechanical", "Mechanical"], ["custom", "Custom"]].forEach(function (c) {
+    [["electrical", "Electrical"], ["data", "Data / Comms"], ["hvac", "HVAC"], ["mechanical", "Mechanical"], ["custom", "Custom"]].forEach(function (c) {
       var items = all.filter(function (s) { return s.category === c[0]; });
       if (!items.length) return;
       var lab = document.createElement("div"); lab.className = "cat-label";
@@ -1787,6 +1808,246 @@
     mergeDbPackages(); mergeDbSymbols();
   }
 
+  // ------------- symbol drawing canvas -------------
+  var _drawShapes    = [];
+  var _drawTool      = "rect";
+  var _symActiveTab  = "upload";
+  var _drawIsDown    = false;
+  var _drawStart     = null;
+  var _drawPreview   = null;
+  var _dragIdx       = -1;
+  var _dragOffset    = null;
+
+  function _switchSymTab(tab) {
+    _symActiveTab = tab;
+    var isD = tab === "draw";
+    $("symPanelUpload").style.display = isD ? "none" : "";
+    $("symPanelDraw").style.display   = isD ? "" : "none";
+    $("symTabUpload").style.borderBottomColor = isD ? "transparent" : "var(--accent,#ffb02e)";
+    $("symTabUpload").style.color             = isD ? "var(--faint)" : "var(--text)";
+    $("symTabUpload").style.fontWeight        = isD ? "normal" : "600";
+    $("symTabDraw").style.borderBottomColor   = isD ? "var(--accent,#ffb02e)" : "transparent";
+    $("symTabDraw").style.color               = isD ? "var(--text)" : "var(--faint)";
+    $("symTabDraw").style.fontWeight          = isD ? "600" : "normal";
+  }
+
+  function _canvasXY(canvas, e) {
+    var r = canvas.getBoundingClientRect();
+    var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    var cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+    var sx = canvas.width  / r.width;
+    var sy = canvas.height / r.height;
+    return { x: cx * sx, y: cy * sy };
+  }
+
+  function _drawShapeOnCtx(ctx, s, preview) {
+    ctx.save();
+    ctx.strokeStyle = s.stroke || "#38bdf8";
+    ctx.lineWidth   = s.sw || 2;
+    ctx.fillStyle   = s.fill || "none";
+    if (preview) { ctx.globalAlpha = 0.6; ctx.setLineDash([4, 3]); }
+    if (s.type === "rect") {
+      if (s.fill !== "none") { ctx.fillRect(s.x, s.y, s.w, s.h); }
+      ctx.strokeRect(s.x, s.y, s.w, s.h);
+    } else if (s.type === "ellipse") {
+      ctx.beginPath();
+      ctx.ellipse(s.x + s.w / 2, s.y + s.h / 2, Math.max(1, Math.abs(s.w / 2)), Math.max(1, Math.abs(s.h / 2)), 0, 0, Math.PI * 2);
+      if (s.fill !== "none") ctx.fill();
+      ctx.stroke();
+    } else if (s.type === "line") {
+      ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + s.w, s.y + s.h); ctx.stroke();
+    } else if (s.type === "text") {
+      ctx.fillStyle  = s.stroke || "#38bdf8";
+      ctx.font       = "bold " + (s.textSize || Math.max(10, (s.sw || 2) * 5)) + "px IBM Plex Sans, sans-serif";
+      ctx.textAlign  = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(s.text || "", s.x, s.y);
+    }
+    ctx.restore();
+  }
+
+  function _redrawSymCanvas() {
+    var canvas = $("symDrawCanvas"); if (!canvas) return;
+    var ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // transparent background — just clear
+    _drawShapes.forEach(function (s) { _drawShapeOnCtx(ctx, s, false); });
+    if (_drawPreview) _drawShapeOnCtx(ctx, _drawPreview, true);
+  }
+
+  function _drawShapesToSVG() {
+    var canvas = $("symDrawCanvas"); if (!canvas) return "";
+    var vw = canvas.width, vh = canvas.height;
+    var bg = "";
+    function esc(v) { return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+    var els = _drawShapes.map(function (s) {
+      var sa = 'stroke="' + esc(s.stroke || "#38bdf8") + '" stroke-width="' + (s.sw || 2) + '"';
+      var fa = 'fill="' + esc(s.fill !== "none" ? (s.fill || "none") : "none") + '"';
+      if (s.type === "rect") {
+        return '<rect x="' + s.x + '" y="' + s.y + '" width="' + s.w + '" height="' + s.h + '" ' + fa + ' ' + sa + '/>';
+      } else if (s.type === "ellipse") {
+        var cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+        return '<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + Math.abs(s.w / 2) + '" ry="' + Math.abs(s.h / 2) + '" ' + fa + ' ' + sa + '/>';
+      } else if (s.type === "line") {
+        return '<line x1="' + s.x + '" y1="' + s.y + '" x2="' + (s.x + s.w) + '" y2="' + (s.y + s.h) + '" ' + sa + ' fill="none"/>';
+      } else if (s.type === "text") {
+        return '<text x="' + s.x + '" y="' + s.y + '" fill="' + esc(s.stroke || "#38bdf8") + '" font-family="IBM Plex Sans,sans-serif" font-size="' + (s.textSize || Math.max(10, (s.sw || 2) * 5)) + '" font-weight="bold" text-anchor="middle" dominant-baseline="middle">' + esc(s.text || "") + '</text>';
+      }
+      return "";
+    }).join("");
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + vw + ' ' + vh + '" width="' + vw + '" height="' + vh + '">' + bg + els + "</svg>";
+  }
+
+  function _initSymDrawCanvas() {
+    var canvas = $("symDrawCanvas"); if (!canvas) return;
+
+    function getProps() {
+      var noFill = $("symDrawNoFill").checked;
+      return {
+        stroke:    $("symDrawStroke").value,
+        fill:      noFill ? "none" : $("symDrawFill").value,
+        sw:        parseInt($("symDrawSW").value, 10) || 2,
+        textSize:  parseInt($("symDrawTextSize").value, 10) || 16
+      };
+    }
+
+    function _hitTestShapes(x, y) {
+      for (var i = _drawShapes.length - 1; i >= 0; i--) {
+        var s = _drawShapes[i];
+        if (s.type === "text") {
+          if (Math.abs(x - s.x) < 50 && Math.abs(y - s.y) < 14) return i;
+        } else if (s.type === "rect") {
+          var rx1 = Math.min(s.x, s.x + s.w) - 4, rx2 = Math.max(s.x, s.x + s.w) + 4;
+          var ry1 = Math.min(s.y, s.y + s.h) - 4, ry2 = Math.max(s.y, s.y + s.h) + 4;
+          if (x >= rx1 && x <= rx2 && y >= ry1 && y <= ry2) return i;
+        } else if (s.type === "ellipse") {
+          var ecx = s.x + s.w / 2, ecy = s.y + s.h / 2;
+          var erx = Math.abs(s.w / 2) + 5, ery = Math.abs(s.h / 2) + 5;
+          if (Math.abs(x - ecx) <= erx && Math.abs(y - ecy) <= ery) return i;
+        } else if (s.type === "line") {
+          var ldx = s.w, ldy = s.h, llen2 = ldx * ldx + ldy * ldy;
+          if (llen2 < 1) continue;
+          var lt = Math.max(0, Math.min(1, ((x - s.x) * ldx + (y - s.y) * ldy) / llen2));
+          var lpx = s.x + lt * ldx - x, lpy = s.y + lt * ldy - y;
+          if (lpx * lpx + lpy * lpy < 64) return i;
+        }
+      }
+      return -1;
+    }
+
+    canvas.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      _drawStart = _canvasXY(canvas, e);
+      _drawIsDown = true;
+
+      if (_drawTool === "select") {
+        _dragIdx = _hitTestShapes(_drawStart.x, _drawStart.y);
+        if (_dragIdx >= 0) {
+          var s = _drawShapes[_dragIdx];
+          _dragOffset = { x: _drawStart.x - s.x, y: _drawStart.y - s.y };
+        }
+        return;
+      }
+      if (_drawTool === "text") {
+        var txt = prompt("Enter text:");
+        if (txt) {
+          var p = getProps();
+          _drawShapes.push({ type: "text", x: _drawStart.x, y: _drawStart.y, w: 0, h: 0,
+                             text: txt, stroke: p.stroke, fill: p.fill, sw: p.sw, textSize: p.textSize });
+          _redrawSymCanvas();
+        }
+        _drawIsDown = false; _drawStart = null;
+      }
+    });
+
+    canvas.addEventListener("mousemove", function (e) {
+      var pt = _canvasXY(canvas, e);
+      if (_drawTool === "select") {
+        if (_drawIsDown && _dragIdx >= 0 && _dragOffset) {
+          var s = _drawShapes[_dragIdx];
+          s.x = pt.x - _dragOffset.x;
+          s.y = pt.y - _dragOffset.y;
+          _redrawSymCanvas();
+        } else {
+          canvas.style.cursor = _hitTestShapes(pt.x, pt.y) >= 0 ? "grab" : "default";
+        }
+        return;
+      }
+      if (!_drawIsDown || !_drawStart || _drawTool === "text") return;
+      var p = getProps();
+      _drawPreview = { type: _drawTool, x: _drawStart.x, y: _drawStart.y,
+                       w: pt.x - _drawStart.x, h: pt.y - _drawStart.y,
+                       stroke: p.stroke, fill: p.fill, sw: p.sw };
+      _redrawSymCanvas();
+    });
+
+    function finishDraw(e) {
+      if (_drawTool === "select") {
+        _dragIdx = -1; _dragOffset = null; _drawIsDown = false;
+        canvas.style.cursor = "default";
+        return;
+      }
+      if (!_drawIsDown || !_drawStart || _drawTool === "text") { _drawIsDown = false; return; }
+      var pt = _canvasXY(canvas, e.changedTouches ? { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY } : e);
+      var p  = getProps();
+      var shape = { type: _drawTool, x: _drawStart.x, y: _drawStart.y,
+                    w: pt.x - _drawStart.x, h: pt.y - _drawStart.y,
+                    stroke: p.stroke, fill: p.fill, sw: p.sw };
+      if (Math.abs(shape.w) >= 3 || Math.abs(shape.h) >= 3) {
+        _drawShapes.push(shape);
+      }
+      _drawPreview = null; _drawIsDown = false; _drawStart = null;
+      _redrawSymCanvas();
+    }
+    canvas.addEventListener("mouseup",    finishDraw);
+    canvas.addEventListener("mouseleave", finishDraw);
+    // Double-click in select mode toggles fill on the hit shape
+    canvas.addEventListener("dblclick", function (e) {
+      if (_drawTool !== "select") return;
+      var pt = _canvasXY(canvas, e);
+      var idx = _hitTestShapes(pt.x, pt.y);
+      if (idx < 0) return;
+      var s = _drawShapes[idx];
+      if (s.type === "text") return;
+      s.fill = (s.fill === "none") ? ($("symDrawFill").value || "#1e3a4a") : "none";
+      _redrawSymCanvas();
+    });
+    canvas.addEventListener("touchstart",  function (e) { e.preventDefault(); var m = e.touches[0]; canvas.dispatchEvent(new MouseEvent("mousedown", { clientX: m.clientX, clientY: m.clientY })); }, { passive: false });
+    canvas.addEventListener("touchmove",   function (e) { e.preventDefault(); var m = e.touches[0]; canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: m.clientX, clientY: m.clientY })); }, { passive: false });
+    canvas.addEventListener("touchend",    function (e) { e.preventDefault(); canvas.dispatchEvent(new MouseEvent("mouseup",    { clientX: 0, clientY: 0, changedTouches: e.changedTouches })); }, { passive: false });
+
+    $("symDrawSW").addEventListener("input", function () {
+      var sw = parseInt(this.value, 10) || 2;
+      $("symDrawSWVal").textContent = sw;
+      _drawShapes.forEach(function (s) { s.sw = sw; });
+      _redrawSymCanvas();
+    });
+    $("symDrawTextSize").addEventListener("input", function () {
+      var sz = parseInt(this.value, 10) || 16;
+      $("symDrawTextSizeVal").textContent = sz;
+      _drawShapes.forEach(function (s) { if (s.type === "text") s.textSize = sz; });
+      _redrawSymCanvas();
+    });
+    $("symDrawUndo").addEventListener("click", function () {
+      _drawShapes.pop(); _redrawSymCanvas();
+    });
+    $("symDrawClear").addEventListener("click", function () {
+      if (_drawShapes.length && !confirm("Clear all shapes?")) return;
+      _drawShapes = []; _redrawSymCanvas();
+    });
+    document.querySelectorAll(".sym-draw-tool").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _drawTool = this.dataset.dtool;
+        canvas.style.cursor = _drawTool === "select" ? "default" : "crosshair";
+        document.querySelectorAll(".sym-draw-tool").forEach(function (b) {
+          b.style.borderColor = b === btn ? "var(--accent,#ffb02e)" : "var(--border)";
+          b.style.color       = b === btn ? "var(--text)" : "var(--faint,#6b7280)";
+        });
+      });
+    });
+    $("symTabUpload").addEventListener("click", function () { _switchSymTab("upload"); });
+    $("symTabDraw").addEventListener("click",   function () { _switchSymTab("draw"); _redrawSymCanvas(); });
+  }
+
   // ------------- settings -------------
   function openSettings() {
     openModal("modalSettings"); $("settingsMsg").innerHTML = "";
@@ -1842,25 +2103,31 @@
     var existing = editId ? (customSymbol(editId) || LIB.byId[editId]) : null;
     $("symEditId").value = editId || "";
     $("symName").value  = existing ? existing.name : "";
-    $("symCat").value   = existing ? existing.category : "electrical";
+    $("symCat").value   = existing ? (existing.category || "electrical") : "electrical";
     $("symImg").value   = "";
     $("symPreview").innerHTML = existing
       ? '<img src="' + symImageURL(editId) + '" style="width:40px;height:40px;border:1px solid var(--border);border-radius:8px;background:#10151d">'
       : "";
     $("symbolMsg").innerHTML = "";
-    // Modal title and buttons
     $("symbolModalTitle").textContent = existing ? "Edit symbol" : "Add custom symbol";
     $("symbolSave").textContent = existing ? "Save changes" : "Add symbol";
-    // Delete button: only show for custom symbols (not built-ins)
     var editSym = editId ? customSymbol(editId) : null;
     var isCustom = editId && !!(editSym || (existing && existing.custom));
     $("symbolDelete").style.display = isCustom ? "inline-flex" : "none";
     $("symbolDelete").onclick = function () { closeModal("modalSymbol"); deleteCustomSymbol(editId); };
-    // Image field hint: different for edit vs add
-    var hint = $("symImgField").querySelector(".hint");
+    var hint = $("symImgHint");
     if (hint) hint.textContent = existing
       ? "Leave blank to keep the current image, or upload a new one to replace it."
       : "Leave blank and a labelled badge is auto-generated.";
+
+    // Draw tab — pre-fill mm dims and shapes if re-editing a drawn symbol
+    $("symWidthMm").value  = (existing && existing.widthMm)  ? existing.widthMm  : "";
+    $("symHeightMm").value = (existing && existing.heightMm) ? existing.heightMm : "";
+    _drawShapes = (existing && existing.shapesJson) ? JSON.parse(existing.shapesJson) : [];
+    _symActiveTab = (existing && existing.shapesJson) ? "draw" : "upload";
+    _switchSymTab(_symActiveTab);
+    _redrawSymCanvas();
+
     openModal("modalSymbol");
     setTimeout(function () { $("symName").focus(); $("symName").select(); }, 50);
   }
@@ -1874,27 +2141,31 @@
   function symbolSave() {
     var name = $("symName").value.trim();
     if (!name) { $("symbolMsg").innerHTML = '<div class="status-msg err">Enter a name.</div>'; return; }
-    var cat     = $("symCat").value;
-    var f       = $("symImg").files[0];
-    var editId  = $("symEditId").value;
+    var cat    = $("symCat").value;
+    var f      = $("symImg").files[0];
+    var editId = $("symEditId").value;
     var existing = editId ? customSymbol(editId) : null;
+
+    var wMm = parseFloat($("symWidthMm").value)  || null;
+    var hMm = parseFloat($("symHeightMm").value) || null;
 
     function persistSymbol(sym) {
       fetch("/api/symbols", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(sym) }).catch(function () {});
     }
 
-    function applyEdit(dataURL) {
+    function applyMeta(sym, dataURL, shapesJson) {
+      if (dataURL)    sym.dataURL    = dataURL;
+      if (wMm)        sym.widthMm    = wMm;    else delete sym.widthMm;
+      if (hMm)        sym.heightMm   = hMm;    else delete sym.heightMm;
+      if (shapesJson) sym.shapesJson = shapesJson; else delete sym.shapesJson;
+    }
+
+    function applyEdit(dataURL, shapesJson) {
       if (existing) {
-        // Update existing custom symbol in-place
-        existing.name     = name;
-        existing.category = cat;
-        if (dataURL) {
-          existing.dataURL = dataURL;
-          delete symbolImages[editId];
-          ensureSymbolImage(editId);
-        }
-        // Re-render any placed instances so their images update
+        existing.name = name; existing.category = cat;
+        applyMeta(existing, dataURL, shapesJson);
+        if (dataURL) { delete symbolImages[editId]; ensureSymbolImage(editId); }
         if (sheet()) {
           sheet().symbols.forEach(function (s) {
             if (s.type === editId && symbolNodes[s.id]) {
@@ -1907,17 +2178,17 @@
         closeModal("modalSymbol"); renderPalette(); refreshTakeoff();
         toast('Symbol "' + name + '" updated');
       } else if (editId) {
-        // Editing a built-in: save as a custom override with the same id
-        // (so existing placements still work)
         state.customSymbols = state.customSymbols || [];
         var override = customSymbol(editId);
         if (override) {
           override.name = name; override.category = cat;
-          if (dataURL) { override.dataURL = dataURL; delete symbolImages[editId]; ensureSymbolImage(editId); }
+          applyMeta(override, dataURL, shapesJson);
+          if (dataURL) { delete symbolImages[editId]; ensureSymbolImage(editId); }
           persistSymbol(override);
         } else {
           var s = { id: editId, name: name, category: cat,
                     dataURL: dataURL || symImageURL(editId), custom: true };
+          applyMeta(s, null, shapesJson);
           state.customSymbols.push(s);
           delete symbolImages[editId]; ensureSymbolImage(editId);
           persistSymbol(s);
@@ -1925,23 +2196,32 @@
         closeModal("modalSymbol"); renderPalette(); refreshTakeoff();
         toast('Symbol "' + name + '" updated');
       } else {
-        // Add new
-        var s = { id: uid("csym"), name: name, category: cat, dataURL: dataURL, custom: true };
+        var ns = { id: uid("csym"), name: name, category: cat,
+                   dataURL: dataURL, custom: true };
+        applyMeta(ns, null, shapesJson);
         state.customSymbols = state.customSymbols || [];
-        state.customSymbols.push(s);
-        delete symbolImages[s.id]; ensureSymbolImage(s.id);
-        persistSymbol(s);
+        state.customSymbols.push(ns);
+        delete symbolImages[ns.id]; ensureSymbolImage(ns.id);
+        persistSymbol(ns);
         closeModal("modalSymbol"); renderPalette(); toast('Symbol "' + name + '" added');
       }
     }
 
-    if (f) {
+    if (_symActiveTab === "draw") {
+      if (!_drawShapes.length && !existing) {
+        $("symbolMsg").innerHTML = '<div class="status-msg err">Draw at least one shape first.</div>';
+        return;
+      }
+      var svg    = _symActiveTab === "draw" && _drawShapes.length ? _drawShapesToSVG() : null;
+      var du     = svg ? "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg))) : null;
+      var sj     = _drawShapes.length ? JSON.stringify(_drawShapes) : null;
+      applyEdit(du || (existing ? null : buildLabelSymbol(name, cat)), sj);
+    } else if (f) {
       var r = new FileReader();
-      r.onload = function () { applyEdit(r.result); };
+      r.onload = function () { applyEdit(r.result, null); };
       r.readAsDataURL(f);
     } else {
-      // No new file: keep existing image or generate badge for new symbols
-      applyEdit(existing ? null : buildLabelSymbol(name, cat));
+      applyEdit(existing ? null : buildLabelSymbol(name, cat), null);
     }
   }
 
@@ -2104,6 +2384,7 @@
 
     $("addSymbol").onclick = function () { openSymbolModal(); };
     $("symbolCancel").onclick = function () { closeModal("modalSymbol"); };
+    _initSymDrawCanvas();
     $("symbolSave").onclick = symbolSave;
     $("symImg").onchange = previewSymbol;
     $("addPart").onclick = openPartModal;

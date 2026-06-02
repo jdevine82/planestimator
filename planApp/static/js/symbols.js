@@ -36,6 +36,7 @@
     categoryColors: {
       electrical: "#38bdf8",
       data:       "#34d399",
+      hvac:       "#67e8f9",
       mechanical: "#fb923c",
       custom:     "#c084fc"
     },
