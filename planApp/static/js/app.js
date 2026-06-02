@@ -460,7 +460,7 @@
         deleteSelected();
       }});
     } else if (routeId) {
-      items.push({ label: "✏️  Select route", action: function () {
+      items.push({ label: "✏️  Edit route properties", action: function () {
         if (tool !== "select") setTool("select");
         select("route", routeId);
       }});
@@ -533,7 +533,7 @@
                     : tool === "measure"   ? "#34d399"
                     : tool === "route"     ? activeLayerColor()
                     : activeLayerColor();
-    var isDashed = tool === "route";
+    var isDashed = false;
     if (!draftPreview) {
       draftPreview = new Konva.Line({ points: pts, stroke: strokeColor,
         strokeWidth: 2 * k, dash: isDashed ? [10 * k, 5 * k] : [8 * k, 6 * k],
@@ -749,15 +749,25 @@
     if (!draftPoints || draftPoints.length < 4) { cancelDraft(); return; }
     pushUndo();
     if (!sheet().routes) sheet().routes = [];
-    var route = { id: uid("rte"), layerId: state.activeLayerId, points: draftPoints.slice() };
-    sheet().routes.push(route); renderRoute(route); cancelDraft();
+    var route = { id: uid("rte"), layerId: state.activeLayerId, points: draftPoints.slice(),
+      description: "", stickLengthM: 4,
+      straightPkgId: null, cornerPkgId: null, teePkgId: null,
+      teeCount: 0, cornerCountOverride: null, lengthM: null };
+    recalcRoute(route);
+    sheet().routes.push(route); renderRoute(route); cancelDraft(); refreshTakeoff();
   }
+  function recalcRoute(route) {
+    var mpp = mppOf(sheet());
+    route.lengthM = mpp ? polyLengthPx(route.points) * mpp : null;
+  }
+  function routeAutoCorners(route) { return Math.max(0, Math.floor(route.points.length / 2) - 2); }
+  window.recalcRoute = recalcRoute;
   function renderRoute(route) {
     var lay = layerById(route.layerId) || { color: "#38bdf8", visible: true };
     var k = 1 / stage.scaleX();
     var kl = new Konva.Line({ points: route.points.slice(), stroke: lay.color, strokeWidth: 2 * k,
       lineCap: "round", lineJoin: "round", hitStrokeWidth: 12,
-      dash: [12 * k, 5 * k], draggable: false, visible: lay.visible !== false });
+      draggable: false, visible: lay.visible !== false });
     kl._routeId = route.id; kl._isRoute = true;
     kl.on("click tap", function (e) { if (tool === "select") { e.cancelBubble = true; select("route", route.id); } });
     routeNodes[route.id] = kl; shapeLayer.add(kl);
@@ -878,7 +888,7 @@
   }
   function repositionLabel(line) { /* label hidden — nothing to reposition */ }
   function refreshLineLabel(line)  { /* label hidden — nothing to refresh */ }
-  function recalcAllLines() { var sh = sheet(); if (!sh) return; sh.lines.forEach(function (l) { recalcLine(l); refreshLineLabel(l); }); refreshTakeoff(); renderLayers(); }
+  function recalcAllLines() { var sh = sheet(); if (!sh) return; sh.lines.forEach(function (l) { recalcLine(l); refreshLineLabel(l); }); (sh.routes || []).forEach(recalcRoute); refreshTakeoff(); renderLayers(); }
 
   // ------------- selection -------------
   function select(kind, id) {
@@ -897,6 +907,8 @@
     } else if (kind === "route") {
       var rn = routeNodes[id]; rn.strokeWidth(4 / stage.scaleX()); rn.shadowColor("#38bdf8"); rn.shadowBlur(8);
       if (transformer) transformer.nodes([]);
+      var _rsh = sheet(), _robj = _rsh && (_rsh.routes || []).find(function (r) { return r.id === id; });
+      if (_robj) { switchTab("properties"); window._appSelectedRoute = _robj; if (window.renderRouteProperties) window.renderRouteProperties(_robj); }
     } else if (kind === "textAnnot") {
       var tn = textNodes[id]; tn.shadowColor("#ffb02e"); tn.shadowBlur(10); tn.shadowOpacity(0.8);
       if (transformer) transformer.nodes([tn]);
@@ -2085,6 +2097,8 @@
       window.syncRefLabel      = syncRefLabel;
       window.syncAllRefLabels  = syncAllRefLabels;
       window.openAssign        = openAssign;
+      window.refreshTakeoff    = refreshTakeoff;
+      window.routeAutoCorners  = routeAutoCorners;
       // Auto-restore last open project on page load / refresh
       fetch("/api/session").then(function (r) { return r.json(); }).then(function (sess) {
         if (sess && sess.lastProject) {
@@ -3091,6 +3105,96 @@
     });
   };
 
+  // ── Route takeoff section ─────────────────────────────────────────
+  var _origRefreshTakeoffRoutes = refreshTakeoff;
+  refreshTakeoff = function () {
+    _origRefreshTakeoffRoutes.apply(this, arguments);
+    renderRouteTakeoffRows();
+  };
+  function renderRouteTakeoffRows() {
+    if (!state) return;
+    var rate    = state.labourRate || 0;
+    var tbody   = $("tab-takeoff") && $("tab-takeoff").querySelector("tbody");
+    var tfoot   = $("tab-takeoff") && $("tab-takeoff").querySelector("tfoot");
+    if (!tbody) return;
+
+    // Collect all routes across all sheets
+    var allRoutes = [];
+    (state.sheets || []).forEach(function (sh) {
+      (sh.routes || []).forEach(function (r) { allRoutes.push(r); });
+    });
+    // Only show routes that have at least one package linked or a measured length
+    var routesWithData = allRoutes.filter(function (r) {
+      return r.straightPkgId || r.cornerPkgId || r.teePkgId;
+    });
+    if (!routesWithData.length) return;
+
+    // Find any custom part or package by part_no
+    function findPart(id) {
+      if (!id) return null;
+      return (state.customParts || []).find(function (p) { return p.part_no === id; });
+    }
+
+    var extraCost = 0, extraRetail = 0;
+    var html = '<tr class="group-head"><td colspan="6">Routes &amp; Conduit</td></tr>';
+
+    routesWithData.forEach(function (route) {
+      var lengthM     = route.lengthM || 0;
+      var stickLen    = route.stickLengthM || 4;
+      var stickCount  = lengthM > 0 ? Math.ceil(lengthM / stickLen) : 0;
+      var autoCorners = routeAutoCorners(route);
+      var cornerCount = (route.cornerCountOverride != null) ? route.cornerCountOverride : autoCorners;
+      var teeCount    = route.teeCount || 0;
+
+      var straightPart = findPart(route.straightPkgId);
+      var cornerPart   = findPart(route.cornerPkgId);
+      var teePart      = findPart(route.teePkgId);
+
+      var label = escapeHtml(route.description || "Route");
+      var meta  = lengthM > 0 ? lengthM.toFixed(2) + " m · " + stickCount + " sticks" : "no scale set";
+      if (cornerCount) meta += " · " + cornerCount + " corners";
+      if (teeCount)    meta += " · " + teeCount + " tees";
+
+      html += '<tr><td colspan="6" style="font-size:11px;font-weight:600;color:var(--text);padding:5px 8px 2px;background:var(--bg-alt)">' +
+        label + ' <span style="font-weight:400;color:var(--faint);font-size:10px">' + meta + '</span></td></tr>';
+
+      // Expand a part or package into BOM rows.
+      // Package: expand each component × qty. Single part: one row at qty.
+      function expandPart(part, qty, slotLabel) {
+        if (!part || qty <= 0) return;
+        var rows = part.isPackage && part.components && part.components.length
+          ? part.components.map(function (c) { return { desc: c.description, pno: c.part_no, unit: c.unit || "ea", cost: c.cost || 0, retail: c.retail || 0, qty: qty * (c.qty || 1) }; })
+          : [{ desc: part.description, pno: part.part_no, unit: part.unit || "ea", cost: part.cost || 0, retail: part.retail || 0, qty: qty }];
+        rows.forEach(function (r) {
+          var mc = r.qty * r.cost, mr = r.qty * r.retail;
+          extraCost += mc; extraRetail += mr;
+          html += '<tr><td style="padding-left:18px;font-size:11px">└ <span style="color:var(--faint);font-size:10px">[' + escapeHtml(slotLabel) + ']</span> ' +
+            escapeHtml(r.desc) + ' <span style="color:var(--faint);font-size:10px">[' + escapeHtml(r.pno) + ']</span>' +
+            '</td><td class="num">' + r.qty + ' ' + escapeHtml(r.unit) +
+            '</td><td class="num">' + fmt$(mc) +
+            '</td><td class="num">' + fmt$(mr) +
+            '</td><td class="num">—</td><td class="num">—</td></tr>';
+        });
+      }
+
+      expandPart(straightPart, stickCount,  "straight ×" + stickCount);
+      expandPart(cornerPart,   cornerCount, "corner ×"   + cornerCount);
+      expandPart(teePart,      teeCount,    "tee ×"      + teeCount);
+    });
+
+    tbody.insertAdjacentHTML("beforeend", html);
+
+    if (tfoot && (extraCost || extraRetail)) {
+      var cells = tfoot.querySelectorAll("td");
+      if (cells.length >= 4) {
+        var oc = parseFloat(cells[2].textContent.replace(/[^0-9.]/g, "")) || 0;
+        var or = parseFloat(cells[3].textContent.replace(/[^0-9.]/g, "")) || 0;
+        cells[2].textContent = fmt$(oc + extraCost);
+        cells[3].textContent = fmt$(or + extraRetail);
+      }
+    }
+  }
+
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 })();
@@ -3667,6 +3771,172 @@
     makeDragger("resizeLeft",  "left");
     makeDragger("resizeRight", "right");
   }
+
+  // ── Route properties panel ─────────────────────────────────────────
+  window.renderRouteProperties = function (route) {
+    var box = $("tab-properties"); if (!box) return;
+    var state = getState(); if (!state) return;
+
+    function calcStats() {
+      var lm  = route.lengthM;
+      var sl  = route.stickLengthM || 4;
+      var sc  = (lm != null && lm > 0) ? Math.ceil(lm / sl) : null;
+      var ac  = window.routeAutoCorners ? window.routeAutoCorners(route) : Math.max(0, Math.floor(route.points.length / 2) - 2);
+      var cc  = (route.cornerCountOverride != null) ? route.cornerCountOverride : ac;
+      var tc  = route.teeCount || 0;
+      return { lm: lm, sc: sc, ac: ac, cc: cc, tc: tc };
+    }
+
+    function statsHtml(s) {
+      return '<div id="rte-stats" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">' +
+        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Length</div><div style="font-size:13px;font-weight:600">' + (s.lm != null ? s.lm.toFixed(2) + ' m' : '<span style="color:var(--faint)">no scale</span>') + '</div></div>' +
+        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Sticks</div><div style="font-size:13px;font-weight:600">' + (s.sc != null ? s.sc : '—') + '</div></div>' +
+        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Corners <span style="font-size:9px">(auto ' + s.ac + ')</span></div><div style="font-size:13px;font-weight:600">' + s.cc + '</div></div>' +
+        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Tees</div><div style="font-size:13px;font-weight:600">' + s.tc + '</div></div>' +
+        '</div>';
+    }
+
+    function field(label, id, val, type, placeholder, extra) {
+      return '<div style="margin-bottom:8px">' +
+        '<label style="display:block;font-size:11px;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">' + label + '</label>' +
+        '<input id="' + id + '" type="' + (type||"text") + '" value="' + escHtml(String(val != null ? val : "")) + '"' +
+        (placeholder ? ' placeholder="' + escHtml(placeholder) + '"' : '') + (extra||"") +
+        ' style="width:100%;padding:6px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:12px;box-sizing:border-box"></div>';
+    }
+
+    // Inline search picker — renders a label + selected badge + search input + results list
+    function pickerHtml(label, slotId, currentPartNo) {
+      var cp = (state.customParts || []).find(function (p) { return p.part_no === currentPartNo; });
+      var badgeHtml = cp
+        ? '<div id="' + slotId + '-badge" style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--bg-alt);border:1px solid var(--accent);border-radius:5px;font-size:11px;margin-bottom:4px">' +
+            '<span style="flex:1"><strong>' + escHtml(cp.part_no) + '</strong> — ' + escHtml(cp.description) +
+              (cp.isPackage ? ' <span style="color:var(--accent);font-size:10px">[pkg]</span>' : '') + '</span>' +
+            '<button id="' + slotId + '-clear" style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0">×</button>' +
+          '</div>'
+        : '<div id="' + slotId + '-badge" style="color:var(--faint);font-size:11px;margin-bottom:4px">None selected</div>';
+      return '<div style="margin-bottom:10px">' +
+        '<label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">' + label + '</label>' +
+        badgeHtml +
+        '<input id="' + slotId + '-q" type="text" placeholder="Search parts &amp; packages…" ' +
+          'style="width:100%;padding:5px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:12px;box-sizing:border-box">' +
+        '<div id="' + slotId + '-res" style="max-height:130px;overflow-y:auto;border:1px solid var(--border);border-top:none;border-radius:0 0 5px 5px;display:none"></div>' +
+        '</div>';
+    }
+
+    var s0 = calcStats();
+    box.innerHTML =
+      '<div style="padding:10px 8px">' +
+      '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">Route / Conduit</div>' +
+      statsHtml(s0) +
+      field("Description", "rte-desc", route.description || "", "text", "e.g. 100mm Cable Tray") +
+      field("Stick / section length (m)", "rte-stick", route.stickLengthM || 4, "number", "4.0", ' step="0.1" min="0.1"') +
+      '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
+        '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Fittings</div>' +
+        '<div style="font-size:10px;color:var(--faint);margin-bottom:8px">Corners auto-counted from vertices — override if needed.</div>' +
+        field("Corner count override", "rte-corners", route.cornerCountOverride != null ? route.cornerCountOverride : "", "number", "auto (" + s0.ac + ")", ' min="0" step="1"') +
+        field("Tee count (manual)", "rte-tees", route.teeCount || 0, "number", "0", ' min="0" step="1"') +
+      '</div>' +
+      '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
+        '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Part / package links</div>' +
+        pickerHtml("Straight (per stick)",  "rte-str", route.straightPkgId) +
+        pickerHtml("Corner (per corner)",   "rte-cor", route.cornerPkgId) +
+        pickerHtml("Tee (per tee)",         "rte-tee", route.teePkgId) +
+      '</div>' +
+      '<button class="btn" style="width:100%;justify-content:center;margin-top:12px;color:var(--red,#f87171)" id="rte-delete">🗑 Delete route</button>' +
+      '</div>';
+
+    // Update just the stats block without re-rendering the whole panel
+    function refreshStats() {
+      var sd = $("rte-stats"); if (!sd) return;
+      sd.outerHTML = statsHtml(calcStats());
+    }
+
+    // Wire simple fields
+    function wireField(id, prop, transform) {
+      var el = $(id); if (!el) return;
+      el.onchange = function () {
+        route[prop] = transform ? transform(el.value) : el.value;
+        refreshStats();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+      };
+    }
+    wireField("rte-desc", "description");
+    wireField("rte-stick", "stickLengthM", function (v) { return parseFloat(v) || 4; });
+    wireField("rte-corners", "cornerCountOverride", function (v) { var t = v.trim(); return t === "" ? null : Math.max(0, parseInt(t) || 0); });
+    wireField("rte-tees", "teeCount", function (v) { return Math.max(0, parseInt(v) || 0); });
+
+    // Wire searchable part pickers
+    var _srch = window.searchParts, _deb = window.debounce;
+    function setupPicker(slotId, routeProp) {
+      var qEl  = $(slotId + "-q");
+      var resEl = $(slotId + "-res");
+      if (!qEl || !resEl || !_srch) return;
+
+      function showResults(q) {
+        resEl.innerHTML = '<div style="padding:6px 8px;color:var(--faint);font-size:11px">Searching…</div>';
+        resEl.style.display = "block";
+        _srch(q).then(function (res) {
+          resEl.innerHTML = "";
+          if (!res.parts.length) { resEl.innerHTML = '<div style="padding:6px 8px;color:var(--faint);font-size:11px">No results</div>'; return; }
+          res.parts.slice(0, 40).forEach(function (p) {
+            var d = document.createElement("div");
+            d.style.cssText = "padding:5px 8px;cursor:pointer;font-size:11px;border-bottom:1px solid var(--border)";
+            d.innerHTML = '<strong>' + escHtml(p.part_no) + '</strong> — ' + escHtml(p.description) +
+              (p.isPackage ? ' <span style="color:var(--accent);font-size:10px">[pkg]</span>' : '') +
+              '<div style="font-size:10px;color:var(--faint)">cost ' + (p.cost ? '$' + p.cost.toFixed(2) : '—') + ' · retail ' + (p.retail ? '$' + p.retail.toFixed(2) : '—') + '</div>';
+            d.onmouseenter = function () { d.style.background = "var(--bg-alt)"; };
+            d.onmouseleave = function () { d.style.background = ""; };
+            d.onmousedown  = function (e) {
+              e.preventDefault(); // prevent blur before click
+              route[routeProp] = p.part_no;
+              // Update badge
+              var badge = $(slotId + "-badge");
+              if (badge) badge.outerHTML =
+                '<div id="' + slotId + '-badge" style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--bg-alt);border:1px solid var(--accent);border-radius:5px;font-size:11px;margin-bottom:4px">' +
+                '<span style="flex:1"><strong>' + escHtml(p.part_no) + '</strong> — ' + escHtml(p.description) +
+                  (p.isPackage ? ' <span style="color:var(--accent);font-size:10px">[pkg]</span>' : '') + '</span>' +
+                '<button id="' + slotId + '-clear" style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0">×</button>' +
+                '</div>';
+              wireClear(slotId, routeProp);
+              qEl.value = "";
+              resEl.style.display = "none";
+              refreshStats();
+              if (window.refreshTakeoff) window.refreshTakeoff();
+            };
+            resEl.appendChild(d);
+          });
+        });
+      }
+
+      qEl.oninput = _deb ? _deb(function () { showResults(qEl.value); }, 250) : function () { showResults(qEl.value); };
+      qEl.onfocus = function () { showResults(qEl.value); };
+      qEl.onblur  = function () { setTimeout(function () { resEl.style.display = "none"; }, 150); };
+    }
+
+    function wireClear(slotId, routeProp) {
+      var btn = $(slotId + "-clear"); if (!btn) return;
+      btn.onclick = function () {
+        route[routeProp] = null;
+        var badge = $(slotId + "-badge");
+        if (badge) badge.outerHTML = '<div id="' + slotId + '-badge" style="color:var(--faint);font-size:11px;margin-bottom:4px">None selected</div>';
+        refreshStats();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+      };
+    }
+
+    setupPicker("rte-str", "straightPkgId");
+    setupPicker("rte-cor", "cornerPkgId");
+    setupPicker("rte-tee", "teePkgId");
+    wireClear("rte-str", "straightPkgId");
+    wireClear("rte-cor", "cornerPkgId");
+    wireClear("rte-tee", "teePkgId");
+
+    var delBtn = $("rte-delete");
+    if (delBtn) delBtn.onclick = function () {
+      if (window.deleteSelected) window.deleteSelected();
+      box.innerHTML = '<p style="color:var(--faint);padding:12px 8px;font-size:12px">Route deleted.</p>';
+    };
+  };
 
   // Wire tab clicks for new tabs once DOM ready
   function wireNewTabs() {
