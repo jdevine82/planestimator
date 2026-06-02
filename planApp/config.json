@@ -1,5 +1,5 @@
 {
-  "dbPath": "/home/claude/planApp/data/parts.db",
+  "dbPath": "planApp/data/parts.db",
   "table": "parts",
   "columns": {
     "part_no": "part_no",

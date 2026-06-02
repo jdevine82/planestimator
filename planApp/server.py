@@ -286,6 +286,92 @@ def list_projects():
 
 
 # --------------------------------------------------------------------------- #
+#  Package store — separate 'packages' table in the parts SQLite DB
+#  Schema: part_no TEXT PK, description TEXT, category TEXT,
+#          cost REAL, retail REAL, components TEXT (JSON array)
+# --------------------------------------------------------------------------- #
+
+def _pkg_con():
+    """Return a connection to the parts DB, ensuring the packages table exists."""
+    cfg = load_config()
+    con, _ = get_connection(cfg)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS packages ("
+        "part_no TEXT PRIMARY KEY, description TEXT, category TEXT,"
+        " cost REAL, retail REAL, components TEXT)"
+    )
+    con.commit()
+    return con
+
+def db_load_packages():
+    con = _pkg_con()
+    rows = con.execute(
+        "SELECT part_no, description, category, cost, retail, components FROM packages"
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            comps = json.loads(r[5]) if r[5] else []
+        except Exception:
+            comps = []
+        out.append({"part_no": r[0], "description": r[1], "category": r[2],
+                    "cost": r[3] or 0, "retail": r[4] or 0,
+                    "components": comps, "isPackage": True, "_custom": True, "unit": "ea"})
+    return out
+
+def db_upsert_package(pkg):
+    con = _pkg_con()
+    con.execute(
+        "INSERT OR REPLACE INTO packages (part_no, description, category, cost, retail, components)"
+        " VALUES (?,?,?,?,?,?)",
+        [pkg.get("part_no",""), pkg.get("description",""), pkg.get("category","packages"),
+         float(pkg.get("cost",0) or 0), float(pkg.get("retail",0) or 0),
+         json.dumps(pkg.get("components", []))]
+    )
+    con.commit()
+
+def db_delete_package(part_no):
+    con = _pkg_con()
+    con.execute("DELETE FROM packages WHERE part_no=?", [part_no])
+    con.commit()
+
+
+# --------------------------------------------------------------------------- #
+#  Symbol store — 'symbols' table in the parts SQLite DB
+#  Schema: id TEXT PK, name TEXT, category TEXT, data_url TEXT
+# --------------------------------------------------------------------------- #
+
+def _sym_con():
+    cfg = load_config()
+    con, _ = get_connection(cfg)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS symbols ("
+        "id TEXT PRIMARY KEY, name TEXT, category TEXT, data_url TEXT)"
+    )
+    con.commit()
+    return con
+
+def db_load_symbols():
+    con = _sym_con()
+    rows = con.execute("SELECT id, name, category, data_url FROM symbols").fetchall()
+    return [{"id": r[0], "name": r[1], "category": r[2] or "custom",
+             "dataURL": r[3] or "", "custom": True} for r in rows]
+
+def db_upsert_symbol(sym):
+    con = _sym_con()
+    con.execute(
+        "INSERT OR REPLACE INTO symbols (id, name, category, data_url) VALUES (?,?,?,?)",
+        [sym.get("id",""), sym.get("name",""), sym.get("category","custom"), sym.get("dataURL","")]
+    )
+    con.commit()
+
+def db_delete_symbol(sym_id):
+    con = _sym_con()
+    con.execute("DELETE FROM symbols WHERE id=?", [sym_id])
+    con.commit()
+
+
+# --------------------------------------------------------------------------- #
 #  HTTP handler
 # --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
@@ -358,6 +444,10 @@ class Handler(BaseHTTPRequestHandler):
                 search = (qs.get("q", [""])[0]).strip()
                 limit = int(qs.get("limit", ["100"])[0])
                 return self._send_json({"parts": query_parts(load_config(), search, limit)})
+            if path == "/api/packages":
+                return self._send_json({"packages": db_load_packages()})
+            if path == "/api/symbols":
+                return self._send_json({"symbols": db_load_symbols()})
             if path == "/api/projects":
                 return self._send_json({"projects": list_projects()})
             if path.startswith("/api/projects/"):
@@ -441,11 +531,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not pn:
                     return self._send_error_json("part_no required")
                 con.execute(
-                    'INSERT INTO "%s" ("%s","%s","%s","%s","%s","%s") VALUES (?,?,?,?,?,?)' % (
+                    'INSERT OR REPLACE INTO "%s" ("%s","%s","%s","%s","%s","%s") VALUES (?,?,?,?,?,?)' % (
                         table, col_part, col_desc, col_cost, col_retail, col_cat, col_unit),
                     [pn, body.get("description",""), float(body.get("cost",0) or 0),
                      float(body.get("retail",0) or 0), body.get("category",""), body.get("unit","")])
                 con.commit()
+                return self._send_json({"ok": True})
+            if path == "/api/packages":
+                body = self._read_body()
+                if not str(body.get("part_no", "")).strip():
+                    return self._send_error_json("part_no required")
+                db_upsert_package(body)
+                return self._send_json({"ok": True})
+            if path == "/api/symbols":
+                body = self._read_body()
+                if not str(body.get("id", "")).strip():
+                    return self._send_error_json("id required")
+                db_upsert_symbol(body)
                 return self._send_json({"ok": True})
             return self._send_error_json("Unknown endpoint", 404)
         except Exception as exc:  # noqa: BLE001
@@ -969,6 +1071,14 @@ class Handler(BaseHTTPRequestHandler):
             col_part = cfg["columns"].get("part_no", "part_no")
             con.execute('DELETE FROM "%s" WHERE "%s"=?' % (table, col_part), [part_no])
             con.commit()
+            return self._send_json({"ok": True})
+        if path.startswith("/api/packages/"):
+            part_no = urllib.parse.unquote(path[len("/api/packages/"):])
+            db_delete_package(part_no)
+            return self._send_json({"ok": True})
+        if path.startswith("/api/symbols/"):
+            sym_id = urllib.parse.unquote(path[len("/api/symbols/"):])
+            db_delete_symbol(sym_id)
             return self._send_json({"ok": True})
         return self._send_error_json("Unknown endpoint", 404)
 

@@ -1200,6 +1200,7 @@
       sh.symbols = sh.symbols.filter(function (s) { return s.type !== id; });
     });
     state.customSymbols = (state.customSymbols || []).filter(function (s) { return s.id !== id; });
+    fetch("/api/symbols/" + encodeURIComponent(id), { method: "DELETE" }).catch(function () {});
     delete state.symbolTypes[id]; delete symbolImages[id];
     if (activeSymbolType === id) { activeSymbolType = null; if (tool === "symbol") setTool("select"); }
     shapeLayer.batchDraw(); renderPalette(); refreshTakeoff();
@@ -1714,6 +1715,42 @@
       });
     }).catch(function (e) { box.innerHTML = '<p class="unlinked">' + escapeHtml(e.message) + "</p>"; });
   }
+  // Fetch global symbols from DB and merge into state.customSymbols
+  function mergeDbSymbols() {
+    fetch("/api/symbols").then(function (r) { return r.json(); }).then(function (data) {
+      var syms = data.symbols || [];
+      if (!syms.length) return;
+      state.customSymbols = state.customSymbols || [];
+      syms.forEach(function (sym) {
+        var idx = state.customSymbols.findIndex(function (s) { return s.id === sym.id; });
+        if (idx === -1) { state.customSymbols.push(sym); ensureSymbolImage(sym.id); }
+        else { state.customSymbols[idx] = sym; delete symbolImages[sym.id]; ensureSymbolImage(sym.id); }
+      });
+      renderPalette();
+    }).catch(function () {});
+  }
+  window.mergeDbSymbols = mergeDbSymbols;
+
+  // Fetch packages from DB and merge into state.customParts (DB wins on part_no conflict)
+  function mergeDbPackages() {
+    fetch("/api/packages").then(function (r) { return r.json(); }).then(function (data) {
+      var pkgs = data.packages || [];
+      if (!pkgs.length) return;
+      state.customParts = state.customParts || [];
+      pkgs.forEach(function (pkg) {
+        if (!state.customParts.find(function (p) { return p.part_no === pkg.part_no && p.isPackage; })) {
+          state.customParts.push(pkg);
+        } else {
+          // Update in-place so any changes to the package propagate
+          var idx = state.customParts.findIndex(function (p) { return p.part_no === pkg.part_no && p.isPackage; });
+          if (idx !== -1) state.customParts[idx] = pkg;
+        }
+      });
+      if (window.refreshTakeoff) window.refreshTakeoff();
+    }).catch(function () {});
+  }
+  window.mergeDbPackages = mergeDbPackages;
+
   function loadProject(name) {
     fetch("/api/projects/" + encodeURIComponent(name)).then(function (r) { return r.json(); }).then(function (j) {
       if (j.error) throw new Error(j.error);
@@ -1733,6 +1770,7 @@
       _undoStack = []; _redoStack = []; updateUndoButtons();
       closeModal("modalOpen"); renderPalette(); renderSheets(); renderLayers(); renderActiveSheet(); refreshTakeoff();
       if (window.renderCircuitsTable) renderCircuitsTable();
+      mergeDbPackages(); mergeDbSymbols();
       // Record this as the last-open project so page refresh restores it
       fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: state.name, data: state }) }).catch(function () {});
@@ -1746,6 +1784,7 @@
     window._appState = state;
     renderPalette(); renderSheets(); renderLayers(); renderActiveSheet(); refreshTakeoff();
     if (window.renderCircuitsTable) renderCircuitsTable();
+    mergeDbPackages(); mergeDbSymbols();
   }
 
   // ------------- settings -------------
@@ -1840,6 +1879,11 @@
     var editId  = $("symEditId").value;
     var existing = editId ? customSymbol(editId) : null;
 
+    function persistSymbol(sym) {
+      fetch("/api/symbols", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sym) }).catch(function () {});
+    }
+
     function applyEdit(dataURL) {
       if (existing) {
         // Update existing custom symbol in-place
@@ -1859,6 +1903,7 @@
           });
           shapeLayer && shapeLayer.batchDraw();
         }
+        persistSymbol(existing);
         closeModal("modalSymbol"); renderPalette(); refreshTakeoff();
         toast('Symbol "' + name + '" updated');
       } else if (editId) {
@@ -1869,11 +1914,13 @@
         if (override) {
           override.name = name; override.category = cat;
           if (dataURL) { override.dataURL = dataURL; delete symbolImages[editId]; ensureSymbolImage(editId); }
+          persistSymbol(override);
         } else {
           var s = { id: editId, name: name, category: cat,
                     dataURL: dataURL || symImageURL(editId), custom: true };
           state.customSymbols.push(s);
           delete symbolImages[editId]; ensureSymbolImage(editId);
+          persistSymbol(s);
         }
         closeModal("modalSymbol"); renderPalette(); refreshTakeoff();
         toast('Symbol "' + name + '" updated');
@@ -1883,6 +1930,7 @@
         state.customSymbols = state.customSymbols || [];
         state.customSymbols.push(s);
         delete symbolImages[s.id]; ensureSymbolImage(s.id);
+        persistSymbol(s);
         closeModal("modalSymbol"); renderPalette(); toast('Symbol "' + name + '" added');
       }
     }
@@ -1913,6 +1961,10 @@
     // replace if same part_no already custom
     state.customParts = state.customParts.filter(function (x) { return x.part_no !== pn; });
     state.customParts.push(p);
+    // Persist to DB immediately (INSERT OR REPLACE)
+    fetch("/api/parts", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ part_no: pn, description: p.description, cost: p.cost, retail: p.retail, category: p.category, unit: p.unit })
+    }).catch(function () {}); // fire-and-forget; project save is the fallback
     closeModal("modalPart"); toast('Part "' + pn + '" saved');
     if ($("modalAssign").classList.contains("open")) renderAssignResults($("assignSearch").value);
     else renderPartsLibrary($("partsSearch").value);
@@ -2114,9 +2166,11 @@
       // Auto-restore last open project on page load / refresh
       fetch("/api/session").then(function (r) { return r.json(); }).then(function (sess) {
         if (sess && sess.lastProject) {
-          loadProject(sess.lastProject);
+          loadProject(sess.lastProject); // mergeDbPackages called inside loadProject
+        } else {
+          mergeDbPackages(); mergeDbSymbols();
         }
-      }).catch(function () {});
+      }).catch(function () { mergeDbPackages(); mergeDbSymbols(); });
     } catch (e) {
       console.error(e);
       showFatal(e.message || String(e));
@@ -2506,7 +2560,11 @@
             delBtn.onclick = function () {
               if (!confirm('Delete "' + partNo + '"?')) return;
               if (custom) {
-                if (window._appState) window._appState.customParts = (window._appState.customParts || []).filter(function (x) { return x.part_no !== partNo; });
+                var st = window._appState;
+                if (st) st.customParts = (st.customParts || []).filter(function (x) { return x.part_no !== partNo; });
+                // Delete from whichever DB table holds it (safe to call both)
+                fetch("/api/packages/" + encodeURIComponent(partNo), { method: "DELETE" }).catch(function () {});
+                fetch("/api/parts/" + encodeURIComponent(partNo), { method: "DELETE" }).catch(function () {});
               } else {
                 fetch("/api/parts/" + encodeURIComponent(partNo), { method: "DELETE" })
                   .then(function (r) { return r.json(); })
@@ -3055,9 +3113,12 @@
                 components: JSON.parse(JSON.stringify(pkgComponents)) };
     state.customParts = (state.customParts || []).filter(function (p) { return p.part_no !== pno; });
     state.customParts.push(pkg);
+    // Persist to shared packages table in the DB
+    fetch("/api/packages", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pkg) }).catch(function () {});
     closeModal("modalPackage");
     renderPartsLibrary($("partsSearch").value);
-    toast('Package "' + name + '" saved — link it to a symbol via right-click on the palette → Symbol defaults');
+    toast('Package "' + name + '" saved');
   }
 
   // Extend takeoffRows so that when a device row links to a package part,
