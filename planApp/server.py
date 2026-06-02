@@ -14,10 +14,12 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
 import urllib.parse
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -476,6 +478,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_error_json("Project not found", 404)
                 with open(p, "r", encoding="utf-8") as fh:
                     return self._send_json(json.load(fh))
+            if path == "/api/backup/database":
+                return self._backup_database()
+            if path == "/api/backup/projects":
+                return self._backup_projects()
             if path.startswith("/api/") :
                 return self._send_error_json("Unknown endpoint", 404)
             # static
@@ -568,6 +574,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_error_json("id required")
                 db_upsert_symbol(body)
                 return self._send_json({"ok": True})
+            if path == "/api/restore/database":
+                return self._restore_database()
+            if path == "/api/restore/projects":
+                return self._restore_projects()
             return self._send_error_json("Unknown endpoint", 404)
         except Exception as exc:  # noqa: BLE001
             return self._send_error_json(exc, 500)
@@ -1066,6 +1076,136 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"symbols": symbols})
         except Exception as exc:
             return self._send_error_json("DXF parse error: " + str(exc))
+
+    # -- backup / restore -------------------------------------------------- #
+    def _send_file(self, data, filename, mime="application/octet-stream"):
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _backup_database(self):
+        cfg = load_config()
+        db_path = cfg["dbPath"]
+        if not os.path.exists(db_path):
+            return self._send_error_json("Database file not found")
+        # Use SQLite backup API so we get a consistent snapshot even if DB is open
+        buf = io.BytesIO()
+        src = sqlite3.connect(db_path)
+        dst = sqlite3.connect(":memory:")
+        src.backup(dst)
+        src.close()
+        tmp = io.BytesIO()
+        # Write the in-memory DB to bytes via a temp file path trick
+        import tempfile, pathlib
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            tf_path = tf.name
+        try:
+            src2 = sqlite3.connect(db_path)
+            dst2 = sqlite3.connect(tf_path)
+            src2.backup(dst2); src2.close(); dst2.close()
+            with open(tf_path, "rb") as f:
+                data = f.read()
+        finally:
+            try: os.unlink(tf_path)
+            except OSError: pass
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self._send_file(data, "parts_backup_%s.db" % ts)
+
+    def _backup_projects(self):
+        buf = io.BytesIO()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            # All project JSON files
+            if os.path.isdir(PROJECTS_DIR):
+                for fn in sorted(os.listdir(PROJECTS_DIR)):
+                    if fn.endswith(".json"):
+                        zf.write(os.path.join(PROJECTS_DIR, fn), "projects/" + fn)
+            # Symbol library export
+            try:
+                syms = db_load_symbols()
+                zf.writestr("symbols.json", json.dumps(syms, ensure_ascii=False, indent=2))
+            except Exception:
+                pass
+        data = buf.getvalue()
+        self._send_file(data, "project_backup_%s.zip" % ts, "application/zip")
+
+    def _read_upload_bytes(self):
+        """Parse multipart/form-data and return the raw file bytes."""
+        ct = self.headers.get("Content-Type", "")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length <= 0:
+            return None
+        raw = self.rfile.read(length)
+        if "multipart/form-data" in ct:
+            bm = re.search(r"boundary=([^\s;]+)", ct)
+            if not bm:
+                return None
+            boundary = ("--" + bm.group(1)).encode()
+            for part in raw.split(boundary):
+                if b"filename=" not in part:
+                    continue
+                sep = part.find(b"\r\n\r\n")
+                if sep != -1:
+                    return part[sep + 4:].rstrip(b"\r\n--")
+            return None
+        return raw  # raw binary body
+
+    def _restore_database(self):
+        data = self._read_upload_bytes()
+        if not data:
+            return self._send_error_json("No file received")
+        # Validate it looks like a SQLite file
+        if not data.startswith(b"SQLite format 3"):
+            return self._send_error_json("File does not appear to be a valid SQLite database")
+        cfg = load_config()
+        db_path = cfg["dbPath"]
+        # Close any cached connection to this path
+        with _sqlite_lock:
+            if db_path in _sqlite_cache:
+                try: _sqlite_cache[db_path].close()
+                except Exception: pass
+                del _sqlite_cache[db_path]
+        # Write backup of current DB first
+        if os.path.exists(db_path):
+            shutil.copy2(db_path, db_path + ".bak")
+        with open(db_path, "wb") as f:
+            f.write(data)
+        return self._send_json({"ok": True, "message": "Database restored successfully"})
+
+    def _restore_projects(self):
+        data = self._read_upload_bytes()
+        if not data:
+            return self._send_error_json("No file received")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            return self._send_error_json("File does not appear to be a valid zip archive")
+        restored_projects = 0
+        restored_symbols  = 0
+        for name in zf.namelist():
+            if name.startswith("projects/") and name.endswith(".json"):
+                fn = os.path.basename(name)
+                if fn:
+                    dest = os.path.join(PROJECTS_DIR, fn)
+                    with open(dest, "wb") as f:
+                        f.write(zf.read(name))
+                    restored_projects += 1
+            elif name == "symbols.json":
+                try:
+                    syms = json.loads(zf.read(name).decode("utf-8"))
+                    for sym in syms:
+                        if sym.get("id"):
+                            db_upsert_symbol(sym)
+                    restored_symbols = len(syms)
+                except Exception:
+                    pass
+        zf.close()
+        return self._send_json({"ok": True,
+            "projects": restored_projects, "symbols": restored_symbols})
 
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)

@@ -2121,19 +2121,10 @@
     };
     fetch("/api/settings").then(function (r) { return r.json(); }).then(function (c) {
       $("dbPath").value = c.dbPath || ""; $("dbTable").value = c.table || "";
-      var col = c.columns || {};
-      $("colPart").value = col.part_no || ""; $("colDesc").value = col.description || "";
-      $("colCost").value = col.cost || ""; $("colRetail").value = col.retail || "";
-      $("colUnit").value = col.unit || ""; $("colCat").value = col.category || "";
-      $("colLabour").value = col.labour || "";
     });
   }
   function saveSettings() {
-    var body = { dbPath: $("dbPath").value.trim(), table: $("dbTable").value.trim() || "parts",
-      columns: { part_no: $("colPart").value.trim(), description: $("colDesc").value.trim(),
-        cost: $("colCost").value.trim(), retail: $("colRetail").value.trim(),
-        unit: $("colUnit").value.trim(), category: $("colCat").value.trim(),
-        labour: $("colLabour").value.trim() } };
+    var body = { dbPath: $("dbPath").value.trim(), table: $("dbTable").value.trim() || "parts" };
     fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (j) {
         var m = $("settingsMsg");
@@ -2357,6 +2348,63 @@
     $("btnSettings").onclick = openSettings;
     $("settingsCancel").onclick = function () { closeModal("modalSettings"); };
     $("settingsSave").onclick = saveSettings;
+
+    // Backup / restore
+    function _triggerDownload(url, fallbackName) {
+      var msg = $("backupMsg");
+      msg.innerHTML = '<span style="color:var(--faint);font-size:12px">Preparing download…</span>';
+      fetch(url).then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || r.statusText); });
+        var cd = r.headers.get("Content-Disposition") || "";
+        var m  = cd.match(/filename="([^"]+)"/);
+        var filename = m ? m[1] : fallbackName;
+        return r.blob().then(function (blob) {
+          var a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filename;
+          document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+          msg.innerHTML = '<div class="status-msg ok">Downloaded ' + escapeHtml(filename) + '</div>';
+        });
+      }).catch(function (e) {
+        msg.innerHTML = '<div class="status-msg err">' + escapeHtml(e.message) + '</div>';
+      });
+    }
+    $("btnBackupDb").onclick = function () {
+      _triggerDownload("/api/backup/database", "parts_backup.db");
+    };
+    $("btnBackupProjects").onclick = function () {
+      _triggerDownload("/api/backup/projects", "project_backup.zip");
+    };
+    function _doRestore(file, endpoint, onSuccess) {
+      var msg = $("backupMsg");
+      msg.innerHTML = '<span style="color:var(--faint);font-size:12px">Uploading…</span>';
+      var fd = new FormData(); fd.append("file", file);
+      fetch(endpoint, { method: "POST", body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.error) { msg.innerHTML = '<div class="status-msg err">' + escapeHtml(j.error) + '</div>'; return; }
+          msg.innerHTML = '<div class="status-msg ok">' + escapeHtml(j.message || "Restored successfully") + '</div>';
+          if (onSuccess) onSuccess(j);
+        })
+        .catch(function (e) { msg.innerHTML = '<div class="status-msg err">' + escapeHtml(e.message) + '</div>'; });
+    }
+    $("restoreDbFile").onchange = function () {
+      var f = this.files[0]; if (!f) return;
+      if (!confirm('Replace the current database with "' + f.name + '"? The current database will be backed up as parts.db.bak on the server.')) { this.value = ""; return; }
+      _doRestore(f, "/api/restore/database", function () { renderPartsLibrary($("partsSearch").value || ""); });
+      this.value = "";
+    };
+    $("restoreProjFile").onchange = function () {
+      var f = this.files[0]; if (!f) return;
+      if (!confirm('Restore projects and symbols from "' + f.name + '"? Existing projects with the same name will be overwritten.')) { this.value = ""; return; }
+      _doRestore(f, "/api/restore/projects", function (j) {
+        var msg = $("backupMsg");
+        msg.innerHTML = '<div class="status-msg ok">Restored ' + j.projects + ' project(s) and ' + j.symbols + ' symbol(s).</div>';
+        mergeDbSymbols();
+      });
+      this.value = "";
+    };
 
     $("scaleCancel").onclick = function () { closeModal("modalScale"); };
     $("scaleApply").onclick = applyScale;

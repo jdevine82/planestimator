@@ -181,17 +181,22 @@
           <div class="hint">Absolute path to a SQLite (.db/.sqlite) or .csv file on the server machine.</div>
         </div>
         <div class="field"><label>Table name (SQLite only)</label><input id="dbTable" placeholder="parts" /></div>
-        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">Map your columns:</p>
-        <div class="grid2">
-          <div class="field"><label>Part number</label><input id="colPart" /></div>
-          <div class="field"><label>Description</label><input id="colDesc" /></div>
-          <div class="field"><label>Cost price</label><input id="colCost" /></div>
-          <div class="field"><label>Retail price</label><input id="colRetail" /></div>
-          <div class="field"><label>Unit (optional)</label><input id="colUnit" /></div>
-          <div class="field"><label>Category (optional)</label><input id="colCat" /></div>
-          <div class="field"><label>Labour hrs (optional)</label><input id="colLabour" /></div>
-        </div>
         <div id="settingsMsg"></div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Backup &amp; Restore</p>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:4px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text);min-width:130px">Parts database</span>
+            <button class="btn ghost" id="btnBackupDb" style="font-size:12px;padding:4px 10px">&#8595; Download backup</button>
+            <label class="btn ghost" style="font-size:12px;padding:4px 10px;cursor:pointer">&#8593; Restore&hellip;<input type="file" id="restoreDbFile" accept=".db,.sqlite" style="display:none"></label>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text);min-width:130px">All projects + symbols</span>
+            <button class="btn ghost" id="btnBackupProjects" style="font-size:12px;padding:4px 10px">&#8595; Download backup</button>
+            <label class="btn ghost" style="font-size:12px;padding:4px 10px;cursor:pointer">&#8593; Restore&hellip;<input type="file" id="restoreProjFile" accept=".zip" style="display:none"></label>
+          </div>
+        </div>
+        <div id="backupMsg" style="margin-top:6px"></div>
         <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
         <p style="color:var(--muted);font-size:12px;margin:0 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Ref label style</p>
         <div class="field" style="margin-bottom:8px">
