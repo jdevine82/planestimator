@@ -2282,7 +2282,13 @@
         info.style.cssText = "flex:1;min-width:0;cursor:pointer";
         info.innerHTML = "<span>" + escapeHtml(leafName) + '</span><span class="when">' +
           new Date(p.modified * 1000).toLocaleString() + "</span>";
-        info.onclick = function () { loadProject(p.name); };
+        info.onclick = function () {
+          box.innerHTML = '<div style="text-align:center;padding:32px 16px;color:var(--muted)">' +
+            '<div class="proj-loading-spinner"></div>' +
+            'Opening <strong style="color:var(--text)">' + escapeHtml(leafName) + '</strong>…' +
+            '</div>';
+          loadProject(p.name);
+        };
 
         var moveBtn = document.createElement("button");
         moveBtn.title = "Move / rename";
