@@ -13,7 +13,7 @@
         <div class="logo">DE</div>
         <div>The Devine Estimator<br /><small>TAKEOFF &amp; COSTING</small></div>
       </div>
-      <input id="projName" class="proj-name" placeholder="Untitled project" />
+      <input id="projName" class="proj-name" placeholder="Untitled project" title="Use / to organise into folders, e.g. Client A/Job 1" />
       <div class="toolbar">
         <button class="btn ghost" id="btnNew">New</button>
         <button class="btn ghost" id="btnOpen">Open</button>
@@ -45,9 +45,15 @@
       <div class="resize-handle resize-handle-left" id="resizeLeft"></div>
       <div class="section">
         <h3>Sheets <span class="count" id="sheetCount"></span>
+          <button class="icon-btn" id="lockSheets" title="Lock sheets together (shared pan/zoom)" style="font-size:13px">&#128275;</button>
           <button class="icon-btn" id="addSheet" style="font-size:16px">&#65291;</button>
         </h3>
         <div class="section-body" id="sheetList"></div>
+        <div class="cat-label" id="planOpacityRow" style="--c:var(--faint);margin:4px 0 2px;display:none">
+          Plan opacity
+          <input id="planOpacity" type="range" min="10" max="100" value="100" style="flex:1;accent-color:var(--accent)">
+          <span class="layer-meta" id="planOpacityVal">100%</span>
+        </div>
         <input type="file" id="fileInput" accept="application/pdf,image/*" hidden />
       </div>
 
@@ -119,6 +125,14 @@
         <button class="btn ghost" id="btnEditPartsDb" style="width:100%;justify-content:center;margin-bottom:6px">✏️ Edit parts database</button>
         <button class="btn" id="btnAddManualItem"  style="width:100%;justify-content:center;margin-bottom:6px">➕ Add manual takeoff item</button>
         <button class="btn" id="btnCreatePackage"  style="width:100%;justify-content:center;margin-bottom:8px">📦 Create packaged part</button>
+        <button class="btn ghost" id="btnSyncSM8" style="width:100%;justify-content:center;margin-bottom:6px">&#9729; Sync from ServiceM8</button>
+        <div id="sm8SyncWrap" style="display:none;margin-bottom:8px;padding:0 2px">
+          <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden;margin-bottom:5px">
+            <div id="sm8SyncBar" style="height:100%;background:var(--accent,#ffb02e);width:0%;transition:width .4s"></div>
+          </div>
+          <div id="sm8SyncStatus" style="font-size:12px;color:var(--muted)">Connecting…</div>
+        </div>
+        <div id="sm8SyncResult" style="margin-bottom:8px;font-size:13px"></div>
         <input class="parts-search" id="partsSearch" placeholder="Search parts…" />
         <div id="partsResults"></div>
       </div>
@@ -139,7 +153,7 @@
       <span><span class="k">TOOL</span> <b id="stTool">Select</b></span>
       <span><span class="k">SCALE</span> <b id="stScale">not set</b></span>
       <span><span class="k">CURSOR</span> <b id="stCursor">&mdash;</b></span>
-      <span><span class="k">ZOOM</span> <b id="stZoom">100%</b></span>
+      <span><span class="k">ZOOM</span> <input id="stZoom" type="number" min="3" max="3000" step="1" value="100" title="Type a zoom % and press Enter" style="width:54px;background:none;border:none;border-bottom:1px solid var(--border);color:var(--text);font:inherit;font-weight:700;text-align:right;padding:0 2px;-moz-appearance:textfield"> <span style="font-weight:700">%</span></span>
       <span class="pill" id="stHint">Upload a plan to begin</span>
     </footer>
   </div>
@@ -183,6 +197,13 @@
         <div class="field"><label>Table name (SQLite only)</label><input id="dbTable" placeholder="parts" /></div>
         <div id="settingsMsg"></div>
         <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">ServiceM8 Integration</p>
+        <div class="field">
+          <label>API Key</label>
+          <input id="sm8ApiKey" type="password" placeholder="Your ServiceM8 API key" autocomplete="off" />
+          <div class="hint">Generate in ServiceM8 → Settings → API Keys. Used by the &ldquo;Sync from ServiceM8&rdquo; button to pull materials into this parts database.</div>
+        </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
         <p style="color:var(--muted);font-size:12px;margin:0 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Backup &amp; Restore</p>
         <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:4px">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -220,10 +241,35 @@
   </div>
 
   <div class="modal-back" id="modalOpen">
-    <div class="modal" style="width:460px">
+    <div class="modal" style="width:520px">
       <h2>Open project</h2>
-      <div class="body" id="projList"><p style="color:var(--muted)">Loading&hellip;</p></div>
+      <div class="body" id="projList" style="max-height:60vh;overflow-y:auto"><p style="color:var(--muted)">Loading&hellip;</p></div>
       <div class="foot"><button class="btn ghost" id="openCancel">Cancel</button></div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="modalSave">
+    <div class="modal" style="width:440px">
+      <h2>Save project</h2>
+      <div class="body">
+        <div class="field">
+          <label>Project name</label>
+          <input id="saveNameInp" placeholder="e.g. House wiring" />
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>Folder <span style="color:var(--muted);font-size:11px">(optional)</span></label>
+          <div style="display:flex;gap:6px">
+            <input id="saveFolderInp" placeholder="e.g. Client A" list="saveFolderList" style="flex:1" />
+            <datalist id="saveFolderList"></datalist>
+          </div>
+          <p style="color:var(--faint);font-size:11px;margin:4px 0 0">Use / for nested folders, e.g. Client A/2024</p>
+        </div>
+        <div id="savePreview" style="margin-top:10px;padding:7px 10px;background:var(--bg-alt);border-radius:6px;font-size:12px;font-family:var(--mono);color:var(--muted)"></div>
+      </div>
+      <div class="foot">
+        <button class="btn ghost" id="saveDlgCancel">Cancel</button>
+        <button class="btn primary" id="saveDlgOk">Save</button>
+      </div>
     </div>
   </div>
 
@@ -231,10 +277,8 @@
     <div class="modal" style="width:460px">
       <h2 id="assignTitle">Symbol defaults</h2>
       <div class="body">
-        <input class="parts-search" id="assignSearch" placeholder="Search parts to link…" />
-        <div id="assignResults"></div>
-        <div class="field" style="margin:12px 0 0"><label>Labour (hrs per unit)</label><input id="labourHrs" type="number" step="any" placeholder="e.g. 0.35" /></div>
-        <div id="dropConfig" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <div class="field" style="margin:0 0 12px"><label>Labour (hrs per unit)</label><input id="labourHrs" type="number" step="any" placeholder="e.g. 0.35" /></div>
+        <div id="dropConfig" style="display:none;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:12px">
           <p style="color:var(--muted);font-size:12px;margin:0 0 8px">Cable drop for this device:</p>
           <div class="grid2">
             <div class="field" style="margin:0"><label>Drop length (m)</label><input id="dropLen" type="number" step="any" placeholder="e.g. 3" /></div>
@@ -253,6 +297,10 @@
             </div>
             <p style="color:var(--faint);font-size:11px;margin:4px 0 0">Used for circuit load estimation. Can be overridden per placed instance in the Properties panel.</p>
           </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px">
+          <input class="parts-search" id="assignSearch" placeholder="Search parts to link…" />
+          <div id="assignResults"></div>
         </div>
       </div>
       <div class="foot">
@@ -448,7 +496,7 @@
 
   <!-- FEATURE 2: Manual takeoff item -->
   <div class="modal-back" id="modalManualItem">
-    <div class="modal" style="width:420px">
+    <div class="modal" style="width:480px">
       <h2>Add manual takeoff item</h2>
       <div class="body">
         <input type="hidden" id="miEditId" />
@@ -461,7 +509,18 @@
           <div class="field"><label>Cost price (per unit)</label><input id="miCost" type="number" step="any" placeholder="0.00" /></div>
           <div class="field"><label>Retail price (per unit)</label><input id="miRetail" type="number" step="any" placeholder="0.00" /></div>
         </div>
-        <div class="field"><label>Labour hours (total)</label><input id="miLabour" type="number" step="any" placeholder="0" /></div>
+        <div class="field"><label>Labour hours (per unit)</label><input id="miLabour" type="number" step="any" placeholder="0" /></div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+          <div class="field" style="margin-bottom:4px">
+            <label>Search parts database</label>
+            <input id="miPartSearch" placeholder="Part no or description…" autocomplete="off" />
+          </div>
+          <div id="miPartsResults" style="max-height:160px;overflow-y:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:6px;display:none"></div>
+          <div id="miSelectedPart" style="display:none;margin-bottom:4px;padding:6px 10px;background:var(--bg-alt,#1e2227);border:1px solid var(--accent);border-radius:6px;font-size:12px;align-items:center;justify-content:space-between">
+            <span id="miSelectedPartLabel" style="color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+            <a href="#" id="miClearPart" style="margin-left:8px;font-size:11px;color:var(--muted);white-space:nowrap;flex-shrink:0">✕ clear</a>
+          </div>
+        </div>
       </div>
       <div class="foot">
         <button class="btn ghost" id="manualItemCancel">Cancel</button>
@@ -586,6 +645,8 @@
                 <th style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Retail</th>
                 <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Category</th>
                 <th style="padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Unit</th>
+                <th style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Labour (h)</th>
+                <th style="padding:7px 4px;border-bottom:1px solid var(--border)"></th>
                 <th style="padding:7px 4px;border-bottom:1px solid var(--border)"></th>
               </tr>
             </thead>

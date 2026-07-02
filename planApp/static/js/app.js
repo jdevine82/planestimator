@@ -91,7 +91,7 @@
              customSymbols: [], customParts: [], circuits: [],
              labelScale: 0.4, labelColor: "#e7edf5",
              quoteInfo: { business: "", details: "", client: "", quoteNo: "", taxRate: 10, prices: "retail", notes: "Prices valid for 30 days. E&OE." },
-             sheets: [], activeSheetId: null, activeLayerId: null };
+             sheets: [], activeSheetId: null, activeLayerId: null, sheetsLocked: false };
   }
   function sheet() { return state.sheets.find(function (s) { return s.id === state.activeSheetId; }) || null; }
   function layerById(id) { return state.layers.find(function (l) { return l.id === id; }); }
@@ -136,8 +136,25 @@
     stage.on("mousemove", onStageMove);
     stage.on("dblclick dbltap", onStageDblClick);
     stage.on("contextmenu", onStageContextMenu);
+    var _lastDragPos = null;
+    stage.on("dragstart", function () { _lastDragPos = stage.position(); });
+    stage.on("dragmove", function () {
+      var np = stage.position();
+      if (state.sheetsLocked && _lastDragPos) {
+        var dx = np.x - _lastDragPos.x, dy = np.y - _lastDragPos.y;
+        state.sheets.forEach(function (sh) {
+          if (sh.id === state.activeSheetId || sh.visible === false || sh.viewZoom == null) return;
+          sh.viewX = (sh.viewX || 0) + dx; sh.viewY = (sh.viewY || 0) + dy;
+        });
+      }
+      _lastDragPos = np;
+      updateOverlayPositions();
+    });
+    stage.on("dragend", function () { _lastDragPos = null; });
     window.addEventListener("resize", function () {
       stage.width(wrap.clientWidth); stage.height(wrap.clientHeight);
+      if (overlayCanvas) { overlayCanvas.width = wrap.clientWidth; overlayCanvas.height = wrap.clientHeight; }
+      drawOverlayCanvas();
     });
   }
   function addTransformer() {
@@ -234,7 +251,9 @@
       img.onload = function () {
         var sh = { id: uid("sheet"), name: name || ("Sheet " + (state.sheets.length + 1)),
           planImage: dataURL, imgW: img.naturalWidth, imgH: img.naturalHeight,
-          scale: null, lines: [], symbols: [], routes: [], texts: [] };
+          scale: null, imgOpacity: 1, visible: true,
+          viewX: null, viewY: null, viewZoom: null,
+          lines: [], symbols: [], routes: [], texts: [] };
         state.sheets.push(sh);
         state.activeSheetId = sh.id;
         if (!batch) { renderSheets(); renderActiveSheet(); refreshTakeoff(); }
@@ -246,6 +265,69 @@
   }
 
   // ------------- render active sheet onto canvas -------------
+  function saveCurrentViewport() {
+    var sh = sheet(); if (!sh) return;
+    sh.viewX = stage.x(); sh.viewY = stage.y(); sh.viewZoom = stage.scaleX();
+  }
+
+  // ------------- sheet overlay canvas (screen-space, bypasses Konva RAF) -------------
+  // We draw non-active visible sheets onto a plain HTML canvas so we can update
+  // it synchronously on every drag/zoom event without Konva rendering-cycle conflicts.
+  var overlayCanvas = null, overlayCtx = null;
+  var overlayImages = []; // [{img: HTMLImageElement, sh: sheetRef}]
+
+  function initOverlayCanvas() {
+    var wrap = document.getElementById("canvas-wrap");
+    overlayCanvas = document.createElement("canvas");
+    overlayCanvas.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;";
+    overlayCanvas.width  = wrap.clientWidth;
+    overlayCanvas.height = wrap.clientHeight;
+    // Insert after bgLayer's canvas so overlays appear above the bg colour but
+    // below Konva's shapeLayer (lines/symbols stay on top).
+    var bgCanvasEl = bgLayer.getCanvas()._canvas;
+    bgCanvasEl.parentNode.insertBefore(overlayCanvas, bgCanvasEl.nextSibling);
+    overlayCtx = overlayCanvas.getContext("2d");
+  }
+
+  function drawOverlayCanvas() {
+    if (!overlayCtx) return;
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (!overlayImages.length) return;
+    var curZoom = stage.scaleX(), curX = stage.x(), curY = stage.y();
+    overlayImages.forEach(function (item) {
+      var sh = item.sh;
+      var bX = sh.viewX != null ? sh.viewX : curX;
+      var bY = sh.viewY != null ? sh.viewY : curY;
+      var bZoom = sh.viewZoom != null ? sh.viewZoom : curZoom;
+      overlayCtx.save();
+      overlayCtx.globalAlpha = sh.imgOpacity != null ? sh.imgOpacity : 1;
+      overlayCtx.drawImage(item.img, bX, bY, sh.imgW * bZoom, sh.imgH * bZoom);
+      overlayCtx.restore();
+    });
+  }
+
+  // Load (or reload) overlay images for all visible non-active sheets, then redraw.
+  function renderSheetOverlays() {
+    overlayImages = [];
+    drawOverlayCanvas(); // clear immediately
+    if (!sheet()) return;
+    state.sheets.forEach(function (sh) {
+      if (sh.id === state.activeSheetId) return;
+      if (sh.visible === false) return;
+      if (!sh.planImage) return;
+      var img = new Image();
+      (function (capturedSh, capturedImg) {
+        capturedImg.onload = function () {
+          overlayImages.push({ img: capturedImg, sh: capturedSh });
+          drawOverlayCanvas();
+        };
+      })(sh, img);
+      img.src = sh.planImage;
+    });
+  }
+
+  // Called from pan/zoom handlers — just redraws the overlay canvas synchronously.
+  function updateOverlayPositions() { drawOverlayCanvas(); }
   function renderActiveSheet() {
     bgLayer.destroyChildren(); shapeLayer.destroyChildren(); calLayer.destroyChildren();
     lineNodes = {}; symbolNodes = {}; refLabelNodes = {}; routeNodes = {}; textNodes = {}; calNodes = null; planNode = null;
@@ -253,11 +335,21 @@
     addTransformer();
     var sh = sheet();
     $("emptyState").style.display = sh ? "none" : "flex";
-    if (!sh) { bgLayer.draw(); shapeLayer.draw(); calLayer.draw(); updateScaleStatus(); return; }
+    if (!sh) { bgLayer.draw(); shapeLayer.draw(); calLayer.draw(); updateScaleStatus(); updatePlanOpacityUI(); return; }
     var img = new Image();
     img.onload = function () {
-      planNode = new Konva.Image({ image: img, x: 0, y: 0, width: sh.imgW, height: sh.imgH, listening: false });
-      bgLayer.add(planNode); bgLayer.batchDraw(); fitView();
+      planNode = new Konva.Image({ image: img, x: 0, y: 0, width: sh.imgW, height: sh.imgH, listening: false, opacity: sh.imgOpacity != null ? sh.imgOpacity : 1 });
+      bgLayer.add(planNode); bgLayer.batchDraw();
+      if (sh.viewZoom != null) {
+        stage.scale({ x: sh.viewZoom, y: sh.viewZoom });
+        stage.position({ x: sh.viewX, y: sh.viewY });
+        stage.batchDraw(); updateZoomLabel(); restrokeForZoom();
+      } else {
+        fitView();
+        saveCurrentViewport();
+      }
+      renderSheetOverlays();
+      updatePlanOpacityUI();
     };
     img.src = sh.planImage;
     // Render lines and routes FIRST so symbols sit on top of them in z-order.
@@ -271,7 +363,7 @@
     sh.symbols.forEach(function (s) {
       if (s.visibleLayerId) {
         var lay = layerById(s.visibleLayerId);
-        if (lay && lay.visible === false && symbolNodes[s.id]) symbolNodes[s.id].visible(false);
+        if (lay && lay.visible === false && symbolNodes[s.id]) { symbolNodes[s.id].visible(false); symbolNodes[s.id].listening(false); }
       }
     });
     // Ensure unassigned symbols sit above all lines/routes
@@ -283,22 +375,59 @@
 
   // ------------- view -------------
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // Propagate a viewport change (oldZoom -> newZoom around anchor, plus pan delta) to all locked visible sheets
+  function propagateViewport(oldZoom, newZoom, newX, newY) {
+    if (!state.sheetsLocked) return;
+    state.sheets.forEach(function (sh) {
+      if (sh.id === state.activeSheetId) return;
+      if (sh.visible === false) return;
+      if (sh.viewZoom == null) { sh.viewX = newX; sh.viewY = newY; sh.viewZoom = newZoom; return; }
+      var factor = newZoom / oldZoom;
+      sh.viewX = newX + (sh.viewX - (newX * oldZoom / newZoom)) * factor;
+      sh.viewY = newY + (sh.viewY - (newY * oldZoom / newZoom)) * factor;
+      sh.viewZoom = sh.viewZoom * factor;
+    });
+  }
+
   function onWheel(e) {
     e.evt.preventDefault(); if (!planNode) return;
     var old = stage.scaleX(), ptr = stage.getPointerPosition();
     var to = { x: (ptr.x - stage.x()) / old, y: (ptr.y - stage.y()) / old };
     var ns = clamp(e.evt.deltaY > 0 ? old / 1.12 : old * 1.12, 0.03, 30);
+    var nx = ptr.x - to.x * ns, ny = ptr.y - to.y * ns;
+    if (state.sheetsLocked) {
+      state.sheets.forEach(function (sh) {
+        if (sh.id === state.activeSheetId || sh.visible === false || sh.viewZoom == null) return;
+        var factor = ns / old;
+        sh.viewX = ptr.x - (ptr.x - sh.viewX) * factor;
+        sh.viewY = ptr.y - (ptr.y - sh.viewY) * factor;
+        sh.viewZoom = sh.viewZoom * factor;
+      });
+    }
     stage.scale({ x: ns, y: ns });
-    stage.position({ x: ptr.x - to.x * ns, y: ptr.y - to.y * ns });
+    stage.position({ x: nx, y: ny });
     stage.batchDraw(); updateZoomLabel(); restrokeForZoom();
+    updateOverlayPositions();
   }
   function zoomBy(f) {
     var old = stage.scaleX(), c = { x: stage.width() / 2, y: stage.height() / 2 };
     var to = { x: (c.x - stage.x()) / old, y: (c.y - stage.y()) / old };
     var ns = clamp(old * f, 0.03, 30);
+    var nx = c.x - to.x * ns, ny = c.y - to.y * ns;
+    if (state.sheetsLocked) {
+      state.sheets.forEach(function (sh) {
+        if (sh.id === state.activeSheetId || sh.visible === false || sh.viewZoom == null) return;
+        var factor = ns / old;
+        sh.viewX = c.x - (c.x - sh.viewX) * factor;
+        sh.viewY = c.y - (c.y - sh.viewY) * factor;
+        sh.viewZoom = sh.viewZoom * factor;
+      });
+    }
     stage.scale({ x: ns, y: ns });
-    stage.position({ x: c.x - to.x * ns, y: c.y - to.y * ns });
+    stage.position({ x: nx, y: ny });
     stage.batchDraw(); updateZoomLabel(); restrokeForZoom();
+    updateOverlayPositions();
   }
   function fitView() {
     var sh = sheet(); if (!sh) return;
@@ -306,13 +435,18 @@
     stage.scale({ x: s, y: s });
     stage.position({ x: (stage.width() - sh.imgW * s) / 2, y: (stage.height() - sh.imgH * s) / 2 });
     stage.batchDraw(); updateZoomLabel(); restrokeForZoom();
+    updateOverlayPositions();
   }
-  function updateZoomLabel() { $("stZoom").textContent = Math.round(stage.scaleX() * 100) + "%"; }
+  function updateZoomLabel() {
+    var el = $("stZoom"); if (!el) return;
+    // Don't overwrite while the user is actively editing the field
+    if (document.activeElement !== el) el.value = Math.round(stage.scaleX() * 100);
+  }
   // keep strokes/handles a constant screen size as zoom changes
   function restrokeForZoom() {
     var k = 1 / stage.scaleX();
     Object.values(lineNodes).forEach(function (n) { n.line.strokeWidth((selected && selected.id === n.line._lineId ? 5.4 : 3) * k); });
-    Object.values(routeNodes).forEach(function (n) { if (n._useWorldWidth) return; n.strokeWidth((selected && selected.id === n._routeId ? 4 : 2) * k); });
+    Object.values(routeNodes).forEach(function (n) { if (n._useWorldWidth) return; n.strokeWidth((selected && selected.id === n._routeId ? 4 : 2) * k); n.hitStrokeWidth(Math.max(14 * k, n.strokeWidth() + 6 * k)); });
     if (calNodes) {
       calNodes.line.strokeWidth(2 * k); calNodes.line.dash([10 * k, 6 * k]);
       calNodes.h1.radius(7 * k); calNodes.h2.radius(7 * k);
@@ -644,6 +778,7 @@
     var node = new Konva.Image({ image: symbolImages[s.type], x: s.x, y: s.y, width: w, height: h,
       offsetX: w / 2, offsetY: h / 2, rotation: s.rotation || 0, draggable: tool === "select" });
     node._symId = s.id;
+    node._isSym = true;
 
     // Ref label — sits below the icon, not rotated, always horizontal
     var fs = refLabelFontSize(s);
@@ -663,6 +798,7 @@
     // Centre horizontally
     labelNode.offsetX(labelNode.width() / 2);
     labelNode._symRefLabel = s.id;
+    labelNode._isSym = true;
     refLabelNodes[s.id] = labelNode;
 
     node.on("dragend", function () {
@@ -770,7 +906,9 @@
     var route = { id: uid("rte"), layerId: state.activeLayerId, points: draftPoints.slice(),
       description: "", stickLengthM: 4, lineWidthM: 0,
       straightPkgId: null, cornerPkgId: null, teePkgId: null,
-      teeCount: 0, cornerCountOverride: null, lengthM: null };
+      teeCount: 0, cornerCountOverride: null, lengthM: null,
+      singleCore: false, coreCount: 3, corePkgId: null, earthPkgId: null,
+      circuitId: null };
     recalcRoute(route);
     sheet().routes.push(route); renderRoute(route); cancelDraft(); refreshTakeoff();
   }
@@ -797,8 +935,15 @@
     var kl = new Konva.Line({ points: route.points.slice(), stroke: lay.color, strokeWidth: initSW,
       lineCap: "round", lineJoin: "round", hitStrokeWidth: Math.max(12 * k, initSW + 4 * k),
       draggable: false, visible: lay.visible !== false });
-    kl._routeId = route.id; kl._isRoute = true; kl._lineWidthM = route.lineWidthM || 0; kl._useWorldWidth = worldW > 0;
+    kl._routeId = route.id; kl._isRoute = true; kl._isLine = true; kl._lineWidthM = route.lineWidthM || 0; kl._useWorldWidth = worldW > 0;
     kl.on("click tap", function (e) { if (tool === "select") { e.cancelBubble = true; select("route", route.id); } });
+    kl.on("dblclick dbltap", function (e) {
+      if (tool !== "select") return;
+      e.cancelBubble = true;
+      select("route", route.id);
+      if (window.switchTab) window.switchTab("properties");
+      if (window.renderRouteProperties) window.renderRouteProperties(route);
+    });
     routeNodes[route.id] = kl; shapeLayer.add(kl);
     liftUnassignedSymbols();
     shapeLayer.batchDraw();
@@ -904,6 +1049,7 @@
     var kl = new Konva.Line({ points: line.points.slice(), stroke: lay.color, strokeWidth: 3 * k,
       lineCap: "round", lineJoin: "round", hitStrokeWidth: 14, draggable: false, visible: lay.visible !== false });
     kl._lineId = line.id;
+    kl._isLine = true;
     var lp = pointAtHalf(line.points);
     // Length label intentionally not shown on canvas — lengths accumulate in the layer total only.
     // We keep a stub Group so lineNodes[id].label always exists for code that expects it.
@@ -955,7 +1101,10 @@
     else if (selected.kind === "line"   && lineNodes[selected.id])  { var ln = lineNodes[selected.id].line; ln.shadowBlur(0); ln.strokeWidth(3 / stage.scaleX()); }
     else if (selected.kind === "route"  && routeNodes[selected.id]) { var _rnd = routeNodes[selected.id]; _rnd.shadowBlur(0); if (!_rnd._useWorldWidth) _rnd.strokeWidth(2 / stage.scaleX()); }
     else if (selected.kind === "textAnnot" && textNodes[selected.id]) textNodes[selected.id].shadowBlur(0);
-    selected = null; shapeLayer.batchDraw();
+    selected = null;
+    window._appSelectedRoute = null;
+    if (window.renderPropertiesPanel) window.renderPropertiesPanel(null);
+    shapeLayer.batchDraw();
   }
   function deleteSelected() {
     if (!selected) return; var sh = sheet();
@@ -1029,14 +1178,20 @@
   function renderLayers() {
     var box = $("layerList"); box.innerHTML = ""; $("layerCount").textContent = state.layers.length;
     state.layers.forEach(function (l) {
-      var lenM = 0; state.sheets.forEach(function (sh) { sh.lines.forEach(function (x) { if (x.layerId === l.id) lenM += (x.lengthM || 0); }); });
+      var lenM = 0, routeCount = 0;
+      state.sheets.forEach(function (sh) {
+        sh.lines.forEach(function (x) { if (x.layerId === l.id) lenM += (x.lengthM || 0); });
+        (sh.routes || []).forEach(function (x) { if (x.layerId === l.id) { routeCount++; lenM += (x.lengthM || 0); } });
+      });
       var row = document.createElement("div");
       row.className = "layer-row" + (l.id === state.activeLayerId ? " active" : "");
+      row.dataset.lid = l.id;
       row.innerHTML =
         // Row 1: colour swatch + name + action buttons
         '<div class="layer-row-top">' +
           '<span class="layer-swatch" style="background:' + l.color + '" title="Click to change colour"></span>' +
           '<span class="layer-name-text">' + escapeHtml(l.name) + '</span>' +
+          (routeCount ? '<span style="font-size:10px;color:var(--muted);white-space:nowrap">' + routeCount + ' route' + (routeCount !== 1 ? 's' : '') + '</span>' : '') +
           '<button class="icon-btn rename-btn" title="Rename">✏️</button>' +
           '<button class="icon-btn vis">' + (l.visible ? "&#128065;" : "&#128584;") + '</button>' +
           '<button class="icon-btn del" title="Delete">&#10005;</button>' +
@@ -1103,7 +1258,8 @@
         var onThisLayer = (s.visibleLayerId === l.id) ||
                           (!s.visibleLayerId && typeCfg.palLayerId === l.id);
         if (onThisLayer) {
-          var n = symbolNodes[s.id]; if (n) n.visible(l.visible);
+          var n = symbolNodes[s.id];
+          if (n) { n.visible(l.visible); n.listening(l.visible !== false); }
           var rl = refLabelNodes[s.id]; if (rl) rl.visible(l.visible && !!(s.refNo));
         }
       });
@@ -1122,30 +1278,79 @@
     shapeLayer.batchDraw(); renderLayers(); refreshTakeoff();
   }
 
+  // ------------- plan image opacity -------------
+  function updatePlanOpacityUI() {
+    var row = $("planOpacityRow"); if (row) row.style.display = "none";
+    // Per-sheet opacity is now controlled inline in each sheet row via renderSheets()
+  }
+
   // ------------- sheets panel -------------
   function renderSheets() {
     var box = $("sheetList"); box.innerHTML = ""; $("sheetCount").textContent = state.sheets.length;
+    var lockBtn = $("lockSheets");
+    if (lockBtn) {
+      lockBtn.innerHTML = state.sheetsLocked ? "&#128274;" : "&#128275;";
+      lockBtn.title = state.sheetsLocked ? "Sheets locked — click to unlock" : "Lock sheets together (shared pan/zoom)";
+      lockBtn.style.color = state.sheetsLocked ? "var(--accent)" : "";
+    }
     if (!state.sheets.length) { box.innerHTML = '<p style="color:var(--faint);font-size:12px;margin:4px 0">No sheets yet. Click ＋ or drop a plan.</p>'; return; }
     state.sheets.forEach(function (sh) {
       var devs = sh.symbols.length, runs = sh.lines.length;
+      var opPct = Math.round((sh.imgOpacity != null ? sh.imgOpacity : 1) * 100);
+      var isVisible = sh.visible !== false;
       var row = document.createElement("div");
-      row.className = "layer-row" + (sh.id === state.activeSheetId ? " active" : "");
+      row.className = "layer-row" + (sh.id === state.activeSheetId ? " active" : "") + (!isVisible ? " sh-hidden" : "");
       row.innerHTML =
-        '<input class="layer-name" value="' + escapeHtml(sh.name) + '" />' +
-        '<span class="layer-meta">' + devs + '◦ ' + runs + '/</span>' +
-        '<button class="icon-btn del" title="Delete sheet">&#10005;</button>';
+        '<div class="layer-row-top">' +
+          '<button class="icon-btn sh-eye" title="' + (isVisible ? "Hide sheet" : "Show sheet") + '" style="font-size:14px">' + (isVisible ? "&#128065;" : "&#128683;") + '</button>' +
+          '<input class="layer-name" value="' + escapeHtml(sh.name) + '" />' +
+          '<span class="layer-meta">' + devs + '◦ ' + runs + '/</span>' +
+          '<button class="icon-btn sh-fit" title="Fit sheet to view">&#x26F6;</button>' +
+          '<button class="icon-btn del" title="Delete sheet">&#10005;</button>' +
+        '</div>' +
+        '<div class="layer-row-bottom">' +
+          '<span style="color:var(--muted);min-width:44px">Opacity</span>' +
+          '<input class="sh-opacity" type="range" min="10" max="100" value="' + opPct + '" style="flex:1;accent-color:var(--accent)">' +
+          '<span class="sh-opacity-val" style="min-width:32px;text-align:right">' + opPct + '%</span>' +
+        '</div>';
       row.onclick = function (e) {
-        if (e.target.closest(".icon-btn") || e.target.classList.contains("layer-name")) return;
-        if (sh.id !== state.activeSheetId) { state.activeSheetId = sh.id; renderSheets(); renderActiveSheet(); }
+        if (e.target.closest(".icon-btn") || e.target.classList.contains("layer-name") || e.target.classList.contains("sh-opacity")) return;
+        if (sh.id !== state.activeSheetId) {
+          saveCurrentViewport();
+          state.activeSheetId = sh.id;
+          renderSheets(); renderActiveSheet();
+        }
       };
       var ni = row.querySelector(".layer-name");
       ni.onchange = function () { sh.name = ni.value; }; ni.onclick = function (e) { e.stopPropagation(); };
+      row.querySelector(".sh-eye").onclick = function (e) {
+        e.stopPropagation();
+        sh.visible = sh.visible === false ? true : false;
+        renderSheets(); renderSheetOverlays();
+      };
       row.querySelector(".del").onclick = function (e) {
         e.stopPropagation();
         if (!confirm("Delete sheet \"" + sh.name + "\" and its markups?")) return;
         state.sheets = state.sheets.filter(function (x) { return x.id !== sh.id; });
         if (state.activeSheetId === sh.id) state.activeSheetId = state.sheets[0] ? state.sheets[0].id : null;
         renderSheets(); renderActiveSheet(); refreshTakeoff();
+      };
+      row.querySelector(".sh-fit").onclick = function (e) {
+        e.stopPropagation();
+        if (sh.id !== state.activeSheetId) {
+          saveCurrentViewport();
+          state.activeSheetId = sh.id; renderSheets(); renderActiveSheet(); return;
+        }
+        sh.viewX = null; sh.viewY = null; sh.viewZoom = null; fitView();
+      };
+      var opInp = row.querySelector(".sh-opacity"), opVal = row.querySelector(".sh-opacity-val");
+      opInp.onmousedown = function (e) { e.stopPropagation(); };
+      opInp.oninput = function () {
+        var v = parseInt(this.value, 10) / 100;
+        sh.imgOpacity = v; opVal.textContent = this.value + "%";
+        if (sh.id === state.activeSheetId && planNode) { planNode.opacity(v); bgLayer.batchDraw(); }
+        else { drawOverlayCanvas(); }
+        updatePlanOpacityUI();
       };
       box.appendChild(row);
     });
@@ -1291,7 +1496,7 @@
       $("dropLayer").value = existingObj.dropLayerId || "";
       $("assignCurrentA").value = existingObj.defaultCurrentA != null ? existingObj.defaultCurrentA : "";
     }
-    renderAssignResults(""); openModal("modalAssign"); setTimeout(function () { $("assignSearch").focus(); }, 50);
+    renderAssignResults(""); openModal("modalAssign"); setTimeout(function () { $("labourHrs").focus(); }, 50);
   }
   function populateDropLayers() {
     var sel = $("dropLayer"); sel.innerHTML = '<option value="">— none —</option>';
@@ -1351,6 +1556,8 @@
   }
 
   // ------------- takeoff -------------
+  var consolidateTakeoff = false;
+
   function computeTakeoff() {
     var devices = {}, runs = {};
     state.layers.forEach(function (l) { runs[l.id] = { layer: l, measuredM: 0, dropM: 0 }; });
@@ -1383,6 +1590,13 @@
   // Build the effective takeoff rows, applying any manual overrides.
   function takeoffRows() {
     var t = computeTakeoff(), w = (state.wastagePct || 0) / 100, rate = state.labourRate || 0, rows = [];
+    // Return the live version of a part from customParts (by part_no) so that
+    // edits to labour/cost after assignment are reflected without re-assigning.
+    function livePartLabour(p) {
+      if (!p || !p.part_no) return 0;
+      var live = (state.customParts || []).find(function (x) { return x.part_no === p.part_no; });
+      return live ? (live.labour || 0) : (p.labour || 0);
+    }
     t.devices.forEach(function (d) {
       var cfg = state.symbolTypes[d.type] || {};
       // Per-instance override: use instancePart (may be null = explicitly no part).
@@ -1391,7 +1605,8 @@
       var isInstanceBucket = d.bucketKey && d.bucketKey !== d.type;
       // Qty/hrs overrides only apply to the type-level bucket
       var autoQty = d.count, effQty = (!isInstanceBucket && cfg.qtyOverride != null) ? cfg.qtyOverride : autoQty;
-      var autoHrs = d.count * (cfg.labourHrs || 0), effHrs = (!isInstanceBucket && cfg.hrsOverride != null) ? cfg.hrsOverride : autoHrs;
+      var hrsPerUnit = cfg.labourHrs || livePartLabour(part);
+      var autoHrs = d.count * hrsPerUnit, effHrs = (!isInstanceBucket && cfg.hrsOverride != null) ? cfg.hrsOverride : autoHrs;
       var rowName = symInfo(d.type).name + (isInstanceBucket ? " ★" : "");
       rows.push({ kind: "dev", id: d.type, name: rowName, part: part, color: null, unit: "ea",
         autoQty: autoQty, effQty: effQty, qtyOv: !isInstanceBucket && cfg.qtyOverride != null,
@@ -1403,15 +1618,80 @@
       if (!(run.measuredM || run.dropM)) return;
       var lay = run.layer, part = lay.part || null, installed = run.measuredM + run.dropM;
       var autoQty = installed * (1 + w), effQty = lay.qtyOverride != null ? lay.qtyOverride : autoQty;
-      var autoHrs = installed * (lay.labourHrsPerM || 0), effHrs = lay.hrsOverride != null ? lay.hrsOverride : autoHrs;
+      var hrsPerM = lay.labourHrsPerM || livePartLabour(part);
+      var autoHrs = installed * hrsPerM, effHrs = lay.hrsOverride != null ? lay.hrsOverride : autoHrs;
       rows.push({ kind: "cab", id: lay.id, name: lay.name, part: part, color: lay.color, unit: "m",
         autoQty: autoQty, effQty: effQty, qtyOv: lay.qtyOverride != null,
         autoHrs: autoHrs, effHrs: effHrs, hrsOv: lay.hrsOverride != null,
         matCost: effQty * (part ? part.cost : 0), matRetail: effQty * (part ? part.retail : 0), labour: effHrs * rate,
         meta: run.measuredM.toFixed(2) + "m" + (run.dropM ? (" + " + run.dropM.toFixed(2) + "m drops") : "") });
     });
+    // Apply any group-level hours overrides (stored per part_no for merged device groups)
+    var devGroupOv = state.devGroupOv || {};
+    Object.keys(devGroupOv).forEach(function (pno) {
+      var ovTotal = devGroupOv[pno];
+      if (ovTotal == null) return;
+      var grpRows = rows.filter(function (r) { return r.kind === "dev" && r.part && r.part.part_no === pno; });
+      if (!grpRows.length) return;
+      var autoTotal = grpRows.reduce(function (s, r) { return s + r.autoHrs; }, 0);
+      grpRows.forEach(function (r) {
+        var proportion = autoTotal > 0 ? r.autoHrs / autoTotal : (1 / grpRows.length);
+        r.effHrs = ovTotal * proportion;
+        r.labour = r.effHrs * rate;
+        r.hrsOv = true;
+      });
+    });
     return { rows: rows, rate: rate };
   }
+  function panToWorldPoint(wx, wy) {
+    var sc = stage.scaleX();
+    stage.position({ x: stage.width() / 2 - wx * sc, y: stage.height() / 2 - wy * sc });
+    stage.batchDraw();
+  }
+  function polyCenter(pts) {
+    var mx = 0, my = 0, n = pts.length / 2;
+    for (var i = 0; i < pts.length; i += 2) { mx += pts[i]; my += pts[i + 1]; }
+    return { x: mx / n, y: my / n };
+  }
+  function focusDev(type) {
+    var sh = sheet(); if (!sh) return;
+    var sym = sh.symbols.find(function (s) { return s.type === type; });
+    if (!sym) return;
+    if (tool !== "select") setTool("select");
+    select("symbol", sym.id);
+    panToWorldPoint(sym.x, sym.y);
+    if (window.switchTab) window.switchTab("properties");
+    window._appSelectedSym = sym;
+    if (window.renderPropertiesPanel) window.renderPropertiesPanel(sym);
+  }
+  function focusCab(layerId) {
+    var sh = sheet(); if (!sh) return;
+    var ln = sh.lines.find(function (l) { return l.layerId === layerId; });
+    if (ln && ln.points && ln.points.length >= 4) {
+      var c = polyCenter(ln.points); panToWorldPoint(c.x, c.y);
+    }
+    state.activeLayerId = layerId; renderLayers();
+    var el = document.querySelector("[data-lid='" + layerId + "']");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      el.style.outline = "2px solid var(--accent)";
+      setTimeout(function () { el.style.outline = ""; }, 1200);
+    }
+  }
+  window.focusRoute = function (routeId) {
+    var targetRoute = null;
+    (state.sheets || []).forEach(function (sh) {
+      (sh.routes || []).forEach(function (r) { if (r.id === routeId) targetRoute = r; });
+    });
+    if (!targetRoute) return;
+    if (tool !== "select") setTool("select");
+    select("route", targetRoute.id);
+    if (targetRoute.points && targetRoute.points.length >= 2) {
+      var c = polyCenter(targetRoute.points); panToWorldPoint(c.x, c.y);
+    }
+    if (window.switchTab) window.switchTab("properties");
+    if (window.renderRouteProperties) window.renderRouteProperties(targetRoute);
+  };
   function setOverride(kind, id, key, val) {
     var obj = kind === "dev" ? (state.symbolTypes[id] || (state.symbolTypes[id] = {})) : layerById(id);
     if (!obj) return;
@@ -1471,35 +1751,44 @@
       var pnos = Object.keys(partGroups).sort();
       pnos.forEach(function (pno) {
         var g = partGroups[pno];
-        matCost   += g.matCost;
-        matRetail += g.matRetail;
-        totHrs    += g.hrs;
 
         // If only one underlying row we can still show qty/hrs override inputs keyed to that row
         var singleRow = g.rows.length === 1 ? g.rows[0] : null;
-        var edited = singleRow && (singleRow.qtyOv || singleRow.hrsOv)
-          ? ' <a href="#" class="layer-part" data-reset-kind="dev" data-reset-id="' + escapeHtml(singleRow.id) + '" title="Reset to auto">↺</a>' : "";
+
+        // For merged groups, apply any group-level hrs override from state
+        var grpHrsOv = !singleRow && (state.devGroupOv || {})[pno] != null ? (state.devGroupOv)[pno] : null;
+        var effGrpHrs = grpHrsOv != null ? grpHrsOv : g.hrs;
+        var effGrpLabour = effGrpHrs * rate;
+
+        matCost   += g.matCost;
+        matRetail += g.matRetail;
+        totHrs    += effGrpHrs;
+
+        var edited, qtyCell, hrsCell;
+        if (singleRow) {
+          edited = (singleRow.qtyOv || singleRow.hrsOv)
+            ? ' <a href="#" class="layer-part" data-reset-kind="dev" data-reset-id="' + escapeHtml(singleRow.id) + '" title="Reset to auto">↺</a>' : "";
+          qtyCell = numInput(singleRow, "qty");
+          hrsCell = numInput(singleRow, "hrs");
+        } else {
+          edited = grpHrsOv != null
+            ? ' <a href="#" class="layer-part ta-grp-reset" data-grp-pno="' + escapeHtml(pno) + '" title="Reset to auto">↺</a>' : "";
+          qtyCell = '<span style="font-family:var(--mono);font-size:12px">' + g.qty + '</span>';
+          var grpHrsVal = grpHrsOv != null ? grpHrsOv.toFixed(2) : (effGrpHrs > 0 ? effGrpHrs.toFixed(2) : "");
+          hrsCell = '<input class="ta-grp-hrs" data-grp-pno="' + escapeHtml(pno) + '" type="number" step="any" value="' + grpHrsVal +
+            '" placeholder="' + g.hrs.toFixed(2) + '" title="auto = ' + g.hrs.toFixed(2) + '" style="' + (grpHrsOv != null ? ovStyle : numStyle) + '">';
+        }
 
         var symSubtitle = '<span class="layer-meta">' + escapeHtml(g.symNames.join(", ")) + '</span>';
         var descLine    = g.part.description ? '<br><span style="color:var(--muted);font-size:11px">' + escapeHtml(g.part.description) + '</span>' : "";
 
-        var qtyCell, hrsCell;
-        if (singleRow) {
-          qtyCell = numInput(singleRow, "qty");
-          hrsCell = numInput(singleRow, "hrs");
-        } else {
-          // Multiple underlying rows merged — show totals as plain text (no override input for merged groups)
-          qtyCell = '<span style="font-family:var(--mono);font-size:12px">' + g.qty + '</span>';
-          hrsCell = '<span style="font-family:var(--mono);font-size:12px">' + g.hrs.toFixed(2) + '</span>';
-        }
-
-        html += "<tr><td>" +
+        html += '<tr data-focus-kind="dev" data-focus-id="' + escapeHtml(g.rows[0].id) + '" style="cursor:pointer"><td>' +
           "<strong>" + escapeHtml(pno) + "</strong>" + descLine + "<br>" + symSubtitle + edited +
           '</td><td class="num">' + qtyCell +
           '</td><td class="num">' + fmt$(g.matCost) +
           '</td><td class="num">' + fmt$(g.matRetail) +
           '</td><td class="num">' + hrsCell +
-          '</td><td class="num">' + fmt$(g.labour) + "</td></tr>";
+          '</td><td class="num">' + fmt$(singleRow ? g.labour : effGrpLabour) + "</td></tr>";
       });
 
       // Unlinked symbols — show one row per symbol type with a "link part" prompt
@@ -1509,7 +1798,7 @@
         totHrs    += row.effHrs;
         var edited = (row.qtyOv || row.hrsOv)
           ? ' <a href="#" class="layer-part" data-reset-kind="dev" data-reset-id="' + escapeHtml(row.id) + '" title="Reset to auto">↺</a>' : "";
-        html += "<tr><td>" +
+        html += '<tr data-focus-kind="dev" data-focus-id="' + escapeHtml(row.id) + '" style="cursor:pointer"><td>' +
           '<span style="color:var(--muted)">' + escapeHtml(row.name) + '</span>' +
           ' <a href="#" class="unlinked" data-sym="' + escapeHtml(row.id) + '">link part</a>' +
           (row.meta ? '<br><span class="layer-meta">' + escapeHtml(row.meta) + "</span>" : "") + edited +
@@ -1531,7 +1820,7 @@
         var part = row.part;
         var edited = (row.qtyOv || row.hrsOv)
           ? ' <a href="#" class="layer-part" data-reset-kind="' + row.kind + '" data-reset-id="' + escapeHtml(row.id) + '" title="Reset to auto">↺</a>' : "";
-        html += "<tr><td>" +
+        html += '<tr data-focus-kind="cab" data-focus-id="' + escapeHtml(row.id) + '" style="cursor:pointer"><td>' +
           (row.color ? "<span class='layer-swatch' style='display:inline-block;background:" + row.color + ";width:10px;height:10px;border-radius:2px;margin-right:5px'></span>" : "") +
           escapeHtml(row.name) +
           (part ? '<br><span class="layer-part">' + escapeHtml(part.part_no) + "</span>" : ' <a href="#" class="unlinked" data-lay="' + escapeHtml(row.id) + '">link part</a>') +
@@ -1551,25 +1840,47 @@
 
     var estCost = matCost + totLabour, quote = matRetail + totLabour, margin = quote - estCost;
     html += '<div style="margin-top:12px;border-top:2px solid var(--border-strong);padding-top:10px">';
-    html += '<div class="totals-row"><span>Material cost</span><span>' + fmt$(matCost) + '</span></div>';
-    html += '<div class="totals-row"><span>Material retail</span><span>' + fmt$(matRetail) + '</span></div>';
-    html += '<div class="totals-row"><span>Labour (' + totHrs.toFixed(2) + ' h @ ' + fmt$(rate) + ')</span><span>' + fmt$(totLabour) + '</span></div>';
-    html += '<div class="totals-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span>Estimated cost</span><span>' + fmt$(estCost) + '</span></div>';
-    html += '<div class="totals-row"><span style="color:var(--text)">Quote (retail + labour)</span><span class="big" style="color:var(--text)">' + fmt$(quote) + '</span></div>';
-    html += '<div class="totals-row"><span>Margin</span><span class="big">' + fmt$(margin) + (quote ? '  (' + (margin / quote * 100).toFixed(1) + '%)' : "") + '</span></div>';
+    html += '<div class="totals-row"><span>Material cost</span><span id="toMC">' + fmt$(matCost) + '</span></div>';
+    html += '<div class="totals-row"><span>Material retail</span><span id="toMR">' + fmt$(matRetail) + '</span></div>';
+    html += '<div class="totals-row"><span>Labour (' + totHrs.toFixed(2) + ' h @ ' + fmt$(rate) + ')</span><span id="toLab">' + fmt$(totLabour) + '</span></div>';
+    html += '<div class="totals-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span>Estimated cost</span><span id="toEC">' + fmt$(estCost) + '</span></div>';
+    html += '<div class="totals-row"><span style="color:var(--text)">Quote (retail + labour)</span><span class="big" id="toQ" style="color:var(--text)">' + fmt$(quote) + '</span></div>';
+    html += '<div class="totals-row"><span>Margin</span><span class="big" id="toMG">' + fmt$(margin) + (quote ? '  (' + (margin / quote * 100).toFixed(1) + '%)' : "") + '</span></div>';
     html += '</div>';
-    html += '<button class="btn" id="csvBtn" style="width:100%;justify-content:center;margin-top:10px">⇩ Export takeoff CSV</button>';
+    html += '<button class="btn" id="addManualInline" style="width:100%;justify-content:center;margin-top:10px">➕ Add manual item</button>';
+    html += '<label id="consolidateLbl" style="display:flex;align-items:center;gap:8px;margin-top:10px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);user-select:none">' +
+      '<input type="checkbox" id="consolidateChk"' + (consolidateTakeoff ? ' checked' : '') + '> Consolidate same part no. / cable type in exports</label>';
+    html += '<button class="btn" id="csvBtn" style="width:100%;justify-content:center;margin-top:6px">⇩ Export takeoff CSV</button>';
     html += '<button class="btn primary" id="quoteBtn" style="width:100%;justify-content:center;margin-top:8px">🧾 Printable quote</button>';
+    html += '<button class="btn" id="sm8Btn" style="width:100%;justify-content:center;margin-top:6px;background:var(--bg2);border:1px solid var(--border)">↑ Export to SM8</button>';
 
     var box = $("tab-takeoff"); box.innerHTML = html;
     $("wasteInp").onchange = function () { state.wastagePct = parseFloat(this.value) || 0; refreshTakeoff(); };
     $("rateInp").onchange = function () { state.labourRate = parseFloat(this.value) || 0; refreshTakeoff(); };
+    $("addManualInline").onclick = function () { openManualItemModal(); };
+    $("consolidateChk").onchange = function () { consolidateTakeoff = this.checked; };
     $("csvBtn").onclick = exportCsv;
     $("quoteBtn").onclick = openQuoteModal;
+    $("sm8Btn").onclick = exportToSm8;
     box.querySelectorAll(".ta-num").forEach(function (inp) {
       inp.onchange = function () {
         var v = this.value.trim() === "" ? null : parseFloat(this.value);
         setOverride(this.dataset.kind, this.dataset.id, this.dataset.k === "qty" ? "qtyOverride" : "hrsOverride", v);
+        refreshTakeoff();
+      };
+    });
+    box.querySelectorAll(".ta-grp-hrs").forEach(function (inp) {
+      inp.onchange = function () {
+        var v = this.value.trim() === "" ? null : parseFloat(this.value);
+        if (!state.devGroupOv) state.devGroupOv = {};
+        state.devGroupOv[this.dataset.grpPno] = (v == null || isNaN(v)) ? null : v;
+        refreshTakeoff();
+      };
+    });
+    box.querySelectorAll(".ta-grp-reset").forEach(function (a) {
+      a.onclick = function (e) {
+        e.preventDefault();
+        if (state.devGroupOv) state.devGroupOv[this.dataset.grpPno] = null;
         refreshTakeoff();
       };
     });
@@ -1583,19 +1894,45 @@
     });
     box.querySelectorAll("[data-sym]").forEach(function (a) { a.onclick = function (e) { e.preventDefault(); openAssign("symbol", a.dataset.sym); }; });
     box.querySelectorAll("[data-lay]").forEach(function (a) { a.onclick = function (e) { e.preventDefault(); openAssign("layer", a.dataset.lay); }; });
+    box.querySelectorAll("tr[data-focus-kind]").forEach(function (tr) {
+      tr.addEventListener("click", function (e) {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "A" || e.target.closest("a")) return;
+        var kind = tr.dataset.focusKind, id = tr.dataset.focusId;
+        if (kind === "dev") focusDev(id);
+        else if (kind === "cab") focusCab(id);
+        else if (kind === "route" && window.focusRoute) window.focusRoute(id);
+      });
+      tr.addEventListener("mouseenter", function () { if (!tr.style.background) tr.style.background = "var(--bg-alt)"; });
+      tr.addEventListener("mouseleave", function () { tr.style.background = ""; });
+    });
   }
   function exportCsv() {
     var data = takeoffRows(), rate = data.rate;
+    var exportRows = consolidateTakeoff ? consolidateRows(data.rows) : data.rows;
+    var manualItems = consolidateTakeoff ? consolidateManualItems(state.manualTakeoff) : (state.manualTakeoff || []);
     var rows = [["Section", "Part No", "Description", "Symbol", "Qty", "Edited", "Unit cost", "Unit retail",
       "Material cost", "Material retail", "Labour hrs", "Labour rate", "Labour $"]];
     var matCost = 0, matRetail = 0, totHrs = 0;
-    data.rows.forEach(function (row) {
+    exportRows.forEach(function (row) {
+      var isPkgComp = row.kind === "pkg-comp";
       var part = row.part || {};
-      matCost += row.matCost; matRetail += row.matRetail; totHrs += row.effHrs;
-      rows.push([row.kind === "dev" ? "Device" : "Cable", part.part_no || "(unlinked)", part.description || "", row.name,
+      if (!isPkgComp) { matCost += row.matCost; matRetail += row.matRetail; totHrs += row.effHrs; }
+      var section = row.kind === "dev" ? "Device" : isPkgComp ? "Component" : "Cable";
+      var rowName = isPkgComp ? (part.description || row.name) : row.name;
+      rows.push([section, part.part_no || "(unlinked)", part.description || "", rowName,
         row.kind === "cab" ? row.effQty.toFixed(2) : row.effQty, (row.qtyOv || row.hrsOv) ? "yes" : "",
-        part.cost || "", part.retail || "", row.matCost.toFixed(2), row.matRetail.toFixed(2),
-        row.effHrs.toFixed(2), rate, row.labour.toFixed(2)]);
+        isPkgComp ? "" : (part.cost || ""), isPkgComp ? "" : (part.retail || ""),
+        isPkgComp ? "" : row.matCost.toFixed(2), isPkgComp ? "" : row.matRetail.toFixed(2),
+        isPkgComp ? "" : row.effHrs.toFixed(2), isPkgComp ? "" : rate,
+        isPkgComp ? "" : row.labour.toFixed(2)]);
+    });
+    manualItems.forEach(function (m) {
+      var lpu = m.labourPerUnit != null ? m.labourPerUnit : (m.labour || 0);
+      var lhrs = m.qty * lpu, mc = m.qty * m.cost, mr = m.qty * m.retail;
+      matCost += mc; matRetail += mr; totHrs += lhrs;
+      rows.push(["Manual", (m.part && m.part.part_no) || "", m.description || "", "",
+        m.qty, "", m.cost || "", m.retail || "", mc.toFixed(2), mr.toFixed(2),
+        lhrs.toFixed(2), rate, (lhrs * rate).toFixed(2)]);
     });
     var totLabour = totHrs * rate;
     rows.push([]);
@@ -1607,6 +1944,136 @@
     var csv = rows.map(function (r) { return r.map(function (c) { return '"' + String(c == null ? "" : c).replace(/"/g, '""') + '"'; }).join(","); }).join("\n");
     var blob = new Blob([csv], { type: "text/csv" }), a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = (state.name || "takeoff") + ".csv"; a.click();
+  }
+
+  function consolidateRows(rows) {
+    var groups = {}, order = [];
+    rows.forEach(function (row) {
+      var key = row.part ? (row.part.part_no + '\x00' + row.unit) : ('\x01' + row.id);
+      if (!groups[key]) {
+        groups[key] = { kind: row.kind, id: row.id, name: row.name, part: row.part,
+          color: row.color, unit: row.unit, effQty: 0, autoQty: 0, matCost: 0,
+          matRetail: 0, effHrs: 0, autoHrs: 0, labour: 0, qtyOv: false, hrsOv: false, _names: [] };
+        order.push(key);
+      }
+      var g = groups[key];
+      g.effQty    += row.effQty;
+      g.autoQty   += (row.autoQty || 0);
+      g.matCost   += row.matCost;
+      g.matRetail += row.matRetail;
+      g.effHrs    += row.effHrs;
+      g.autoHrs   += (row.autoHrs || 0);
+      g.labour    += row.labour;
+      if (g._names.indexOf(row.name) === -1) g._names.push(row.name);
+    });
+    return order.map(function (key) {
+      var g = groups[key];
+      if (g._names.length > 1) g.name = g._names.join(', ');
+      return g;
+    });
+  }
+
+  function consolidateManualItems(items) {
+    var groups = {}, order = [];
+    (items || []).forEach(function (m, i) {
+      var key = (m.part && m.part.part_no) ? (m.part.part_no + '\x00' + (m.unit || 'ea')) : ('\x01' + i);
+      if (!groups[key]) {
+        groups[key] = { qty: 0, cost: m.cost || 0, retail: m.retail || 0,
+          description: m.description, part: m.part || null, unit: m.unit || 'ea',
+          labourPerUnit: m.labourPerUnit != null ? m.labourPerUnit : (m.labour || 0), _descs: [] };
+        order.push(key);
+      }
+      var g = groups[key];
+      g.qty += m.qty;
+      if (g._descs.indexOf(m.description) === -1) g._descs.push(m.description);
+    });
+    return order.map(function (key) {
+      var g = groups[key];
+      if (g._descs.length > 1) g.description = g._descs.join(', ');
+      return g;
+    });
+  }
+
+  // ------------- export to ServiceM8 -------------
+  function exportToSm8() {
+    var data = takeoffRows(), rate = data.rate;
+    var items = [], matRetail = 0, totHrs = 0;
+
+    // Group device rows by part number so SM8 gets one line per part
+    var partGroups = {};
+    data.rows.forEach(function (row) {
+      matRetail += row.matRetail;
+      totHrs    += row.effHrs;
+      if (!row.part) {
+        if (row.effQty > 0) {
+          items.push({ name: row.name + " [no part linked]", qty: parseFloat(row.effQty.toFixed(4)), unit_price: 0 });
+        }
+        return;
+      }
+      var pno = row.part.part_no;
+      if (partGroups[pno]) {
+        partGroups[pno].qty += row.effQty;
+      } else {
+        partGroups[pno] = {
+          name: row.part.description || pno,
+          qty: row.effQty,
+          unit_price: parseFloat((row.part.retail || 0).toFixed(4)),
+        };
+      }
+    });
+    Object.keys(partGroups).sort().forEach(function (pno) {
+      var g = partGroups[pno];
+      items.push({ name: g.name, qty: parseFloat(g.qty.toFixed(4)), unit_price: g.unit_price });
+    });
+
+    // Manual items
+    (state.manualTakeoff || []).forEach(function (m) {
+      if (!(m.qty > 0)) return;
+      var lpu = m.labourPerUnit != null ? m.labourPerUnit : (m.labour || 0);
+      totHrs    += m.qty * lpu;
+      matRetail += m.qty * (m.retail || 0);
+      items.push({
+        name: m.description || "Manual item",
+        qty: parseFloat(m.qty),
+        unit_price: parseFloat((m.retail || 0).toFixed(4)),
+      });
+    });
+
+    var payload = {
+      items: items,
+      labour: (totHrs > 0 && rate > 0) ? { hrs: parseFloat(totHrs.toFixed(2)), rate: rate } : null,
+    };
+
+    var btn = $("sm8Btn");
+    btn.disabled = true;
+    btn.textContent = "Exporting…";
+
+    fetch("/api/create-sm8-quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        btn.disabled = false;
+        btn.textContent = "↑ Export to SM8";
+        if (res.ok) {
+          var label = res.job_number ? "Quote #" + res.job_number : res.uuid;
+          var msg = "SM8 Quote created — " + label;
+          if (res.warnings && res.warnings.length) {
+            msg += " (with warnings — check console)";
+            console.warn("SM8 export warnings:", res.warnings);
+          }
+          toast(msg);
+        } else {
+          toast(res.error || "SM8 export failed", true);
+        }
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = "↑ Export to SM8";
+        toast("SM8 export failed — server unreachable", true);
+      });
   }
 
   // ------------- printable quote -------------
@@ -1630,16 +2097,33 @@
     };
     var q = state.quoteInfo, useCost = q.prices === "cost";
     var data = takeoffRows(), rate = data.rate;
+    var exportRows = consolidateTakeoff ? consolidateRows(data.rows) : data.rows;
+    var manualItems = consolidateTakeoff ? consolidateManualItems(state.manualTakeoff) : (state.manualTakeoff || []);
     var rowsHtml = "", materials = 0, totHrs = 0;
-    data.rows.forEach(function (row) {
-      if (!(row.effQty > 0 || row.matRetail > 0 || row.matCost > 0)) return;
-      var unitPrice = row.part ? (useCost ? row.part.cost : row.part.retail) : 0;
-      var amount = useCost ? row.matCost : row.matRetail;
-      materials += amount; totHrs += row.effHrs;
+    exportRows.forEach(function (row) {
+      var isPkgComp = row.kind === "pkg-comp";
+      if (!isPkgComp && !(row.effQty > 0 || row.matRetail > 0 || row.matCost > 0)) return;
+      if (isPkgComp && !(row.effQty > 0)) return;
+      var unitPrice = (!isPkgComp && row.part) ? (useCost ? row.part.cost : row.part.retail) : 0;
+      var amount = isPkgComp ? 0 : (useCost ? row.matCost : row.matRetail);
+      if (!isPkgComp) { materials += amount; totHrs += row.effHrs; }
       var qtyStr = row.unit === "m" ? row.effQty.toFixed(2) + " m" : row.effQty + " ea";
       var desc = (row.part && row.part.description) ? row.part.description : row.name;
-      var pn = row.part ? row.part.part_no : '<span style="color:#b00">— no part linked —</span>';
-      rowsHtml += "<tr><td>" + esc(desc) + "</td><td class='c'>" + esc(pn) + "</td><td class='r'>" + qtyStr +
+      var pn = isPkgComp ? row.part.part_no : (row.part ? row.part.part_no : '<span style="color:#b00">— no part linked —</span>');
+      var amountCell = isPkgComp ? "<span style='color:#999;font-style:italic'>Incl.</span>" : money(amount);
+      rowsHtml += "<tr" + (isPkgComp ? " style='color:#888;font-size:12px'" : "") + "><td>" +
+        (isPkgComp ? "&emsp;↳ " : "") + esc(desc) + "</td><td class='c'>" + esc(pn) + "</td><td class='r'>" + qtyStr +
+        "</td><td class='r'>" + (isPkgComp ? "" : money(unitPrice)) + "</td><td class='r'>" + amountCell + "</td></tr>";
+    });
+    manualItems.forEach(function (m) {
+      if (!(m.qty > 0 || m.cost > 0 || m.retail > 0)) return;
+      var lpu = m.labourPerUnit != null ? m.labourPerUnit : (m.labour || 0);
+      var lhrs = m.qty * lpu;
+      var unitPrice = useCost ? m.cost : m.retail;
+      var amount = useCost ? m.qty * m.cost : m.qty * m.retail;
+      materials += amount; totHrs += lhrs;
+      var pn = m.part ? m.part.part_no : "";
+      rowsHtml += "<tr><td>" + esc(m.description) + "</td><td class='c'>" + esc(pn) + "</td><td class='r'>" + m.qty + " " + esc(m.unit) +
         "</td><td class='r'>" + money(unitPrice) + "</td><td class='r'>" + money(amount) + "</td></tr>";
     });
     var labour = totHrs * rate;
@@ -1691,53 +2175,153 @@
     closeModal("modalQuote");
     setTimeout(function () { try { w.print(); } catch (e) {} }, 500);
   }
-  function saveProject() {
-    state.name = $("projName").value.trim() || "Untitled";
-    // Snapshot every custom symbol actually placed on any sheet so they can be
-    // restored if the DB entry is later deleted
+  function doSaveProject(fullName) {
+    saveCurrentViewport();
+    state.name = fullName;
+    $("projName").value = fullName;
     var usedIds = {};
     (state.sheets || []).forEach(function (sh) {
       (sh.symbols || []).forEach(function (s) { usedIds[s.type] = true; });
     });
     state.usedSymbols = (state.customSymbols || []).filter(function (s) { return usedIds[s.id]; });
     fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: state.name, data: state }) })
+      body: JSON.stringify({ name: fullName, data: state }) })
       .then(function (r) { return r.json(); })
       .then(function (j) { if (j.error) throw new Error(j.error); toast('Saved "' + j.name + '"'); })
       .catch(function (e) { toast("Save failed: " + e.message, true); });
   }
+
+  function saveProject() {
+    // Parse current name into folder + leaf
+    var cur = ($("projName").value || state.name || "").trim();
+    var slash = cur.lastIndexOf("/");
+    var curFolder = slash >= 0 ? cur.substring(0, slash) : "";
+    var curLeaf   = slash >= 0 ? cur.substring(slash + 1) : cur;
+
+    $("saveNameInp").value   = curLeaf   || "Untitled";
+    $("saveFolderInp").value = curFolder || "";
+
+    // Populate folder datalist from existing projects
+    fetch("/api/projects").then(function (r) { return r.json(); }).then(function (j) {
+      var folders = {};
+      (j.projects || []).forEach(function (p) {
+        var parts = p.name.split("/");
+        parts.pop(); // remove leaf
+        for (var i = 1; i <= parts.length; i++) {
+          folders[parts.slice(0, i).join("/")] = true;
+        }
+      });
+      var dl = $("saveFolderList"); dl.innerHTML = "";
+      Object.keys(folders).sort().forEach(function (f) {
+        var opt = document.createElement("option"); opt.value = f; dl.appendChild(opt);
+      });
+    }).catch(function () {});
+
+    updateSavePreview();
+    openModal("modalSave");
+    setTimeout(function () { $("saveNameInp").select(); }, 50);
+  }
+
+  function updateSavePreview() {
+    var name   = $("saveNameInp").value.trim()   || "Untitled";
+    var folder = $("saveFolderInp").value.trim();
+    var full   = folder ? folder + "/" + name : name;
+    $("savePreview").textContent = "📄 " + full;
+  }
   function openProjectList() {
-    openModal("modalOpen"); var box = $("projList"); box.innerHTML = '<p style="color:var(--muted)">Loading…</p>';
+    openModal("modalOpen");
+    var box = $("projList"); box.innerHTML = '<p style="color:var(--muted)">Loading…</p>';
     fetch("/api/projects").then(function (r) { return r.json(); }).then(function (j) {
       if (!j.projects || !j.projects.length) { box.innerHTML = '<p style="color:var(--muted)">No saved projects yet.</p>'; return; }
       box.innerHTML = "";
+
+      // Build recursive tree: node = { projects: [], children: { name: node } }
+      function emptyNode() { return { projects: [], children: {} }; }
+      var root = emptyNode();
       j.projects.forEach(function (p) {
+        var parts = p.name.split("/");
+        var leaf  = parts.pop();
+        var node  = root;
+        parts.forEach(function (seg) {
+          if (!node.children[seg]) node.children[seg] = emptyNode();
+          node = node.children[seg];
+        });
+        node.projects.push({ proj: p, leafName: leaf });
+      });
+
+      // Render a node (folder or root) into a container element
+      function renderNode(node, container) {
+        // Root-level projects first
+        node.projects.forEach(function (entry) { container.appendChild(makeProjectRow(entry.proj, entry.leafName)); });
+        // Then folders, sorted
+        Object.keys(node.children).sort().forEach(function (fname) {
+          container.appendChild(makeFolderEl(fname, node.children[fname]));
+        });
+      }
+
+      function makeFolderEl(name, node) {
+        var wrap = document.createElement("div");
+        var head = document.createElement("div");
+        head.className = "proj-folder-head open";
+        head.innerHTML = '<span class="folder-arrow">&#9654;</span>' +
+          '<span style="font-size:14px">📁</span>' + escapeHtml(name);
+        var body = document.createElement("div");
+        body.className = "proj-folder-body";
+        head.onclick = function () {
+          var open = head.classList.toggle("open");
+          body.style.display = open ? "" : "none";
+        };
+        renderNode(node, body);
+        wrap.appendChild(head); wrap.appendChild(body);
+        return wrap;
+      }
+
+      function makeProjectRow(p, leafName) {
         var d = document.createElement("div"); d.className = "proj-list-item";
-        d.style.cssText = "display:flex;align-items:center;gap:8px";
         var info = document.createElement("div");
-        info.style.cssText = "flex:1;cursor:pointer;min-width:0";
-        info.innerHTML = "<span>" + escapeHtml(p.name) + '</span><span class="when">' + new Date(p.modified * 1000).toLocaleString() + "</span>";
+        info.style.cssText = "flex:1;min-width:0;cursor:pointer";
+        info.innerHTML = "<span>" + escapeHtml(leafName) + '</span><span class="when">' +
+          new Date(p.modified * 1000).toLocaleString() + "</span>";
         info.onclick = function () { loadProject(p.name); };
+
+        var moveBtn = document.createElement("button");
+        moveBtn.title = "Move / rename";
+        moveBtn.textContent = "✎";
+        moveBtn.style.cssText = "background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 7px;flex-shrink:0";
+        moveBtn.onclick = function (e) {
+          e.stopPropagation();
+          var newName = prompt("Move / rename project\n(use / for folders, e.g. Client A/Job 1):", p.name);
+          if (!newName || newName.trim() === p.name) return;
+          fetch("/api/projects/" + encodeURIComponent(p.name), {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ newName: newName.trim() })
+          }).then(function (r) { return r.json(); }).then(function (res) {
+            if (res.error) { toast("Move failed: " + res.error, true); return; }
+            toast('Moved to "' + res.name + '"');
+            openProjectList();
+          }).catch(function () { toast("Move failed", true); });
+        };
+
         var delBtn = document.createElement("button");
-        delBtn.textContent = "🗑";
-        delBtn.title = "Delete project";
+        delBtn.textContent = "🗑"; delBtn.title = "Delete project";
         delBtn.style.cssText = "background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--red,#f87171);cursor:pointer;font-size:14px;padding:3px 7px;flex-shrink:0";
         delBtn.onclick = function (e) {
           e.stopPropagation();
-          if (!confirm('Delete project "' + p.name + '"? This cannot be undone.')) return;
+          if (!confirm('Delete "' + p.name + '"? This cannot be undone.')) return;
           fetch("/api/projects/" + encodeURIComponent(p.name), { method: "DELETE" })
             .then(function (r) { return r.json(); })
-            .then(function (j) {
-              if (j.error) { toast("Delete failed: " + j.error, true); return; }
+            .then(function (res) {
+              if (res.error) { toast("Delete failed: " + res.error, true); return; }
               toast('Deleted "' + p.name + '"');
-              d.remove();
-              if (!box.children.length) box.innerHTML = '<p style="color:var(--muted)">No saved projects yet.</p>';
+              openProjectList();
             });
         };
-        d.appendChild(info);
-        d.appendChild(delBtn);
-        box.appendChild(d);
-      });
+
+        d.appendChild(info); d.appendChild(moveBtn); d.appendChild(delBtn);
+        return d;
+      }
+
+      renderNode(root, box);
     }).catch(function (e) { box.innerHTML = '<p class="unlinked">' + escapeHtml(e.message) + "</p>"; });
   }
   var _pendingRestoreCheck = [];
@@ -2118,10 +2702,12 @@
     };
     fetch("/api/settings").then(function (r) { return r.json(); }).then(function (c) {
       $("dbPath").value = c.dbPath || ""; $("dbTable").value = c.table || "";
+      $("sm8ApiKey").value = c.servicem8ApiKey || "";
     });
   }
   function saveSettings() {
-    var body = { dbPath: $("dbPath").value.trim(), table: $("dbTable").value.trim() || "parts" };
+    var body = { dbPath: $("dbPath").value.trim(), table: $("dbTable").value.trim() || "parts",
+                 servicem8ApiKey: $("sm8ApiKey").value.trim() };
     fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (j) {
         var m = $("settingsMsg");
@@ -2319,8 +2905,31 @@
       state.layers.forEach(function (l) { l.visible = false; applyLayerVisibility(l); });
       renderLayers();
     };
+    $("stZoom").onchange = function () {
+      var pct = parseFloat(this.value);
+      if (!pct || pct < 3 || pct > 3000) { updateZoomLabel(); return; }
+      var ns = pct / 100;
+      var c = { x: stage.width() / 2, y: stage.height() / 2 };
+      var old = stage.scaleX();
+      var to = { x: (c.x - stage.x()) / old, y: (c.y - stage.y()) / old };
+      stage.scale({ x: ns, y: ns });
+      stage.position({ x: c.x - to.x * ns, y: c.y - to.y * ns });
+      stage.batchDraw(); updateZoomLabel(); restrokeForZoom(); updateOverlayPositions();
+    };
+    $("stZoom").onkeydown = function (e) { if (e.key === "Escape") { updateZoomLabel(); this.blur(); } };
     $("addSheet").onclick = function () { $("fileInput").click(); };
     $("fileInput").onchange = function (e) { if (e.target.files[0]) handleFile(e.target.files[0]); e.target.value = ""; };
+    $("lockSheets").onclick = function () {
+      state.sheetsLocked = !state.sheetsLocked;
+      if (state.sheetsLocked) {
+        // Snapshot current stage position into the active sheet so all sheets are relative to it
+        var sh = sheet(); if (sh) { sh.viewX = stage.x(); sh.viewY = stage.y(); sh.viewZoom = stage.scaleX(); }
+        toast("Sheets locked — pan/zoom moves all visible sheets together");
+      } else {
+        toast("Sheets unlocked — each sheet pans/zooms independently");
+      }
+      renderSheets(); renderSheetOverlays();
+    };
     $("dropZone").onclick = function () { $("fileInput").click(); };
 
     var wrap = $("canvas-wrap");
@@ -2334,6 +2943,17 @@
     $("btnNew").onclick = newProject;
     $("btnOpen").onclick = openProjectList;
     $("btnSave").onclick = saveProject;
+    $("saveDlgCancel").onclick = function () { closeModal("modalSave"); };
+    $("saveDlgOk").onclick = function () {
+      var name   = $("saveNameInp").value.trim()   || "Untitled";
+      var folder = $("saveFolderInp").value.trim();
+      var full   = folder ? folder + "/" + name : name;
+      closeModal("modalSave");
+      doSaveProject(full);
+    };
+    $("saveNameInp").oninput   = updateSavePreview;
+    $("saveFolderInp").oninput = updateSavePreview;
+    $("saveNameInp").onkeydown = function (e) { if (e.key === "Enter") $("saveDlgOk").click(); };
     // Undo / Redo buttons
     var btnUndo = $("btnUndo"), btnRedo = $("btnRedo");
     if (btnUndo) { btnUndo.onclick = undoAction; btnUndo.disabled = true; }
@@ -2503,7 +3123,7 @@
       else if (e.key === "t" || e.key === "T") setTool("text");
       else if (e.key === "m" || e.key === "M") setTool("measure");
       else if (e.key === "Enter" && (tool === "line" || tool === "route") && draftPoints) finishCurrent();
-      else if (e.key === "Escape") { cancelDraft(); deselect(); ["modalScale", "modalSettings", "modalOpen", "modalAssign", "modalSymbol", "modalPart", "modalQuote", "modalExportPDF", "modalManualItem", "modalPackage", "modalRenameLayer", "modalRestoreSymbols"].forEach(closeModal); }
+      else if (e.key === "Escape") { cancelDraft(); deselect(); ["modalScale", "modalSettings", "modalOpen", "modalSave", "modalAssign", "modalSymbol", "modalPart", "modalQuote", "modalExportPDF", "modalManualItem", "modalPackage", "modalRenameLayer", "modalRestoreSymbols"].forEach(closeModal); }
       else if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
       else if (e.key === " " && stage) { spaceDown = true; stage.draggable(true); stage.container().style.cursor = "grab"; }
     });
@@ -2517,6 +3137,7 @@
       if (window.__PDF_WORKER__ && window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = window.__PDF_WORKER__;
       state = newState();                 // must exist before preloadSymbols/renderPalette read it
       initStage();
+      initOverlayCanvas();
       preloadSymbols(); renderPalette();
       addLayer("Power"); $("projName").value = "";
       renderSheets(); renderLayers(); renderActiveSheet(); refreshTakeoff(); updateScaleStatus();
@@ -2530,6 +3151,9 @@
       window.debounce       = debounce;
       window.routeNodes     = routeNodes;
       window.textNodes      = textNodes;
+      window.renderLayers         = renderLayers;
+      window.sheet                = sheet;
+      window.applyLayerVisibility = applyLayerVisibility;
       window.syncRefLabel      = syncRefLabel;
       window.syncAllRefLabels  = syncAllRefLabels;
       window.openAssign        = openAssign;
@@ -2572,6 +3196,33 @@
     $("btnAddManualItem").onclick = function () { openManualItemModal(); };
     $("manualItemCancel").onclick = function () { closeModal("modalManualItem"); };
     $("manualItemSave").onclick = saveManualItem;
+    $("miPartSearch").oninput = debounce(function () {
+      var q = $("miPartSearch").value.trim();
+      var box = $("miPartsResults");
+      if (!q) { box.style.display = "none"; box.innerHTML = ""; return; }
+      box.innerHTML = '<p style="color:var(--faint);padding:6px 8px;margin:0">Searching…</p>';
+      box.style.display = "";
+      searchParts(q).then(function (res) {
+        box.innerHTML = "";
+        if (!res.parts.length) { box.innerHTML = '<p style="color:var(--faint);padding:6px 8px;margin:0">No results</p>'; return; }
+        res.parts.slice(0, 40).forEach(function (p) {
+          var d = document.createElement("div");
+          d.className = "part-row";
+          d.style.cursor = "pointer";
+          d.innerHTML = partRowHtml(p);
+          d.onclick = function () { miSelectPart(p); };
+          box.appendChild(d);
+        });
+      });
+    }, 250);
+    $("miClearPart").onclick = function (e) {
+      e.preventDefault();
+      miSelectedPart = null;
+      $("miSelectedPart").style.display = "none";
+      $("miPartSearch").value = "";
+      $("miPartsResults").style.display = "none";
+      $("miPartsResults").innerHTML = "";
+    };
 
     // Feature: Packaged parts – open from parts tab
     $("btnCreatePackage").onclick = function () { openPackageModal(null); };
@@ -2688,6 +3339,62 @@
 
   };
 
+    // ── ServiceM8 sync ─────────────────────────────────────────────
+    var btnSyncSM8 = $("btnSyncSM8");
+    if (btnSyncSM8) btnSyncSM8.onclick = function () {
+      var wrap   = $("sm8SyncWrap");
+      var bar    = $("sm8SyncBar");
+      var status = $("sm8SyncStatus");
+      var result = $("sm8SyncResult");
+
+      result.innerHTML = "";
+      bar.style.width  = "5%";
+      status.textContent = "Connecting to ServiceM8…";
+      wrap.style.display = "block";
+      btnSyncSM8.disabled = true;
+
+      // Animate bar slowly toward 85% while the request is in-flight
+      var pct = 5;
+      var ticker = setInterval(function () {
+        pct = Math.min(85, pct + (Math.random() * 3 + 0.5));
+        bar.style.width = pct + "%";
+        if (pct > 30) status.textContent = "Fetching materials from ServiceM8…";
+        if (pct > 60) status.textContent = "Updating parts database…";
+      }, 400);
+
+      fetch("/api/sync-servicem8", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          clearInterval(ticker);
+          btnSyncSM8.disabled = false;
+          if (j.error) {
+            bar.style.width = "0%";
+            status.textContent = "Failed.";
+            result.innerHTML = '<span style="color:var(--red,#f87171)">Error: ' + escapeHtml(j.error) + '</span>';
+            return;
+          }
+          bar.style.width = "100%";
+          status.textContent = "Done!";
+          result.innerHTML =
+            '<span style="color:var(--green,#34d399)">&#10004; Sync complete</span><br>' +
+            '<span style="font-size:12px;color:var(--muted)">Added: <strong>' + j.added +
+            '</strong> &nbsp; Updated: <strong>' + j.updated +
+            '</strong> &nbsp; Skipped: <strong>' + j.skipped +
+            '</strong> &nbsp; Total: <strong>' + j.total + '</strong></span>';
+          renderPartsLibrary($("partsSearch").value);
+          if ($("modalPartsEditor") && $("modalPartsEditor").classList.contains("open")) {
+            if (window.renderPartsEditor) window.renderPartsEditor($("peSearch").value);
+          }
+        })
+        .catch(function (e) {
+          clearInterval(ticker);
+          btnSyncSM8.disabled = false;
+          bar.style.width = "0%";
+          status.textContent = "Failed.";
+          result.innerHTML = '<span style="color:var(--red,#f87171)">Network error: ' + escapeHtml(e.message) + '</span>';
+        });
+    };
+
     // ── Task 5: Parts database editor ──────────────────────────────
     var btnEditPartsDb = $("btnEditPartsDb");
     if (btnEditPartsDb) btnEditPartsDb.onclick = window.openPartsEditor;
@@ -2699,7 +3406,7 @@
     if (peAddRow) peAddRow.onclick = window.addPartsEditorRow;
 
     // ── Marquee multi-select ─────────────────────────────────────
-    var marqueeActive = false, marqueeStart = null, marqueeIds = [];
+    var marqueeActive = false, marqueeStart = null, marqueeIds = [], marqueeRouteIds = [];
     var marqueeEl  = document.getElementById("marqueeRect");
     var bannerEl   = document.getElementById("multiSelectBanner");
     var countEl    = document.getElementById("multiSelectCount");
@@ -2707,27 +3414,44 @@
     var applyBtn   = document.getElementById("multiLayerApply");
     var clearBtn   = document.getElementById("multiSelectClear");
 
-    function openMultiBanner(ids) {
-      marqueeIds = ids;
-      countEl.textContent = ids.length + " symbol" + (ids.length !== 1 ? "s" : "") + " selected";
+    function openMultiBanner(symIds, rteIds) {
+      marqueeIds      = symIds  || [];
+      marqueeRouteIds = rteIds  || [];
+      var total = marqueeIds.length + marqueeRouteIds.length;
+      var parts = [];
+      if (marqueeIds.length)      parts.push(marqueeIds.length      + " symbol" + (marqueeIds.length !== 1 ? "s" : ""));
+      if (marqueeRouteIds.length) parts.push(marqueeRouteIds.length + " route"  + (marqueeRouteIds.length !== 1 ? "s" : ""));
+      countEl.textContent = parts.join(", ") + " selected";
+
       pickerEl.innerHTML = "<option value=''>— not assigned —</option>";
       (state.layers || []).forEach(function (l) {
         var opt = document.createElement("option");
         opt.value = l.id; opt.textContent = l.name;
         pickerEl.appendChild(opt);
       });
-      var existingLayers = ids.map(function (id) {
+      // Pre-select layer if all selected items share one
+      var allLayerIds = marqueeIds.map(function (id) {
         var s = sheet().symbols.find(function (x) { return x.id === id; });
         return s ? (s.visibleLayerId || "") : "";
-      });
-      var allSame = existingLayers.every(function (v) { return v === existingLayers[0]; });
-      pickerEl.value = allSame ? existingLayers[0] : "";
+      }).concat(marqueeRouteIds.map(function (id) {
+        var r = (sheet().routes || []).find(function (x) { return x.id === id; });
+        return r ? (r.layerId || "") : "";
+      }));
+      var allSame = allLayerIds.length && allLayerIds.every(function (v) { return v === allLayerIds[0]; });
+      pickerEl.value = allSame ? allLayerIds[0] : "";
+
       bannerEl.classList.add("open");
-      ids.forEach(function (id) {
+      marqueeIds.forEach(function (id) {
         var n = symbolNodes[id];
         if (n) { n.shadowColor("#38bdf8"); n.shadowBlur(14); n.shadowOpacity(0.9); }
       });
+      marqueeRouteIds.forEach(function (id) {
+        var n = routeNodes[id];
+        if (n) { n.shadowColor("#38bdf8"); n.shadowBlur(12); n.shadowOpacity(0.9); }
+      });
       shapeLayer.batchDraw();
+      if (window.switchTab) window.switchTab("properties");
+      if (window.renderMultiPropertiesPanel) window.renderMultiPropertiesPanel(marqueeIds, marqueeRouteIds);
     }
 
     function closeMultiBanner() {
@@ -2735,8 +3459,12 @@
       marqueeIds.forEach(function (id) {
         var n = symbolNodes[id]; if (n) n.shadowBlur(0);
       });
-      marqueeIds = [];
+      marqueeRouteIds.forEach(function (id) {
+        var n = routeNodes[id]; if (n) n.shadowBlur(0);
+      });
+      marqueeIds = []; marqueeRouteIds = [];
       shapeLayer.batchDraw();
+      if (window.renderPropertiesPanel) window.renderPropertiesPanel(null);
     }
 
     if (applyBtn) applyBtn.onclick = function () {
@@ -2746,16 +3474,24 @@
         var s = sheet().symbols.find(function (x) { return x.id === id; });
         if (s) s.visibleLayerId = layerId || null;
       });
+      marqueeRouteIds.forEach(function (id) {
+        var r = (sheet().routes || []).find(function (x) { return x.id === id; });
+        if (r) {
+          r.layerId = layerId || null;
+          var lay = state.layers.find(function (l) { return l.id === layerId; });
+          var n = routeNodes[id];
+          if (n) { n.stroke(lay ? lay.color : "#38bdf8"); }
+        }
+      });
       if (layerId) {
         var lay = state.layers.find(function (l) { return l.id === layerId; });
         if (lay) applyLayerVisibility(lay);
       }
-      var count = marqueeIds.length;
+      var total = marqueeIds.length + marqueeRouteIds.length;
+      var layName = layerId ? (state.layers.find(function(l){return l.id===layerId;})||{}).name : null;
       closeMultiBanner();
       refreshTakeoff(); renderLayers();
-      toast(count + " symbol" + (count !== 1 ? "s" : "") + (layerId
-        ? " moved to " + (state.layers.find(function(l){return l.id===layerId;})||{}).name
-        : " unassigned from layer"));
+      toast(total + " item" + (total !== 1 ? "s" : "") + (layName ? " moved to " + layName : " unassigned from layer"));
     };
 
     if (clearBtn) clearBtn.onclick = closeMultiBanner;
@@ -2807,10 +3543,21 @@
       var x2 = (Math.max(marqueeStart.x, cur.x) - ox) / sc;
       var y2 = (Math.max(marqueeStart.y, cur.y) - oy) / sc;
       var sh = sheet(); if (!sh) return;
-      var found = sh.symbols.filter(function (s) {
-        return s.x >= x1 && s.x <= x2 && s.y >= y1 && s.y <= y2;
+      var foundSyms = sh.symbols.filter(function (s) {
+        if (!(s.x >= x1 && s.x <= x2 && s.y >= y1 && s.y <= y2)) return false;
+        var n = symbolNodes[s.id];
+        return n && n.visible();
       }).map(function (s) { return s.id; });
-      if (found.length) openMultiBanner(found);
+      var foundRoutes = (sh.routes || []).filter(function (r) {
+        var n = routeNodes[r.id];
+        if (!n || !n.visible()) return false;
+        var pts = r.points;
+        for (var i = 0; i < pts.length - 1; i += 2) {
+          if (pts[i] >= x1 && pts[i] <= x2 && pts[i+1] >= y1 && pts[i+1] <= y2) return true;
+        }
+        return false;
+      }).map(function (r) { return r.id; });
+      if (foundSyms.length || foundRoutes.length) openMultiBanner(foundSyms, foundRoutes);
     });
 
     document.addEventListener("keydown.marquee", function (e) {
@@ -2886,21 +3633,48 @@
               inp.dataset.field = field;
               inp.style.cssText = "width:100%;background:transparent;border:none;border-bottom:1px solid transparent;color:var(--text,#e7edf5);font-size:12px;padding:2px 2px;min-width:40px;outline:none;";
               inp.onfocus = function () { inp.style.borderBottomColor = "var(--accent,#ffb02e)"; };
+              inp.onkeydown = function (e) { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } };
               inp.onblur  = function () {
                 inp.style.borderBottomColor = "transparent";
                 // Collect all fields from this row and save
                 var data = {};
                 tr.querySelectorAll("input[data-field]").forEach(function (el) { data[el.dataset.field] = el.value; });
+                var newCost   = parseFloat(data.cost)   || 0;
+                var newRetail = parseFloat(data.retail) || 0;
+                var newDesc   = data.description || "";
+                var newLabour = parseFloat(data.labour) || 0;
+                // Push updated prices into every part ref in state so the takeoff
+                // reflects the new values without requiring a re-assign.
+                function _propagate(partNo) {
+                  var st = window._appState; if (!st) return;
+                  function _applyPart(part) {
+                    if (!part || part.part_no !== partNo) return;
+                    part.cost = newCost; part.retail = newRetail;
+                    part.description = newDesc; part.labour = newLabour;
+                  }
+                  Object.values(st.symbolTypes || {}).forEach(function (cfg) { _applyPart(cfg.part); });
+                  (st.layers || []).forEach(function (l) { _applyPart(l.part); });
+                  (st.sheets || []).forEach(function (sh) {
+                    (sh.symbols || []).forEach(function (sym) { _applyPart(sym.partOverride); });
+                  });
+                  if (window.refreshTakeoff) window.refreshTakeoff();
+                }
                 if (isCustom) {
                   var cp = window._appState && window._appState.customParts && window._appState.customParts.find(function (x) { return x.part_no === p.part_no; });
-                  if (cp) { cp.description = data.description || ""; cp.cost = parseFloat(data.cost) || 0; cp.retail = parseFloat(data.retail) || 0; cp.category = data.category || ""; cp.unit = data.unit || ""; }
+                  if (cp) {
+                    cp.description = newDesc; cp.cost = newCost; cp.retail = newRetail;
+                    cp.category = data.category || ""; cp.unit = data.unit || ""; cp.labour = newLabour;
+                    if (cp.isPackage) { fetch("/api/packages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cp) }).catch(function () {}); }
+                    _propagate(p.part_no);
+                  }
                 } else {
                   fetch("/api/parts/" + encodeURIComponent(p.part_no), {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ description: data.description, cost: parseFloat(data.cost) || 0, retail: parseFloat(data.retail) || 0, category: data.category, unit: data.unit })
+                    body: JSON.stringify({ description: newDesc, cost: newCost, retail: newRetail, category: data.category, unit: data.unit, labour: newLabour })
                   }).then(function (r) { return r.json(); }).then(function (j) {
-                    if (j.error && msg) msg.textContent = "Save error: " + j.error;
+                    if (j.error && msg) { msg.textContent = "Save error: " + j.error; }
+                    else { _propagate(p.part_no); }
                   });
                 }
               };
@@ -2926,6 +3700,25 @@
           tr.appendChild(mkCell(p.retail != null ? Number(p.retail).toFixed(2) : "0.00", true, true, "retail"));
           tr.appendChild(mkCell(p.category || "", false, true, "category"));
           tr.appendChild(mkCell(p.unit     || "", false, true, "unit"));
+          tr.appendChild(mkCell(p.labour  != null ? Number(p.labour).toFixed(3) : "", true, true, "labour"));
+
+          // Edit button (packages only)
+          if (p.isPackage) {
+            var editTd = document.createElement("td");
+            editTd.style.cssText = "padding:4px;text-align:center;vertical-align:middle;";
+            var editBtn = document.createElement("button");
+            editBtn.textContent = "✏️";
+            editBtn.style.cssText = "background:transparent;border:none;cursor:pointer;font-size:12px;padding:2px 6px;";
+            editBtn.title = "Edit package";
+            (function (pkg) {
+              editBtn.onclick = function () { openPackageModal(pkg); };
+            })(p);
+            editTd.appendChild(editBtn);
+            tr.appendChild(editTd);
+          } else {
+            // Empty cell to keep column alignment
+            tr.appendChild(document.createElement("td"));
+          }
 
           // Delete cell
           var delTd = document.createElement("td");
@@ -3010,8 +3803,10 @@
     var bgVis = bgLayer.visible();
     if (!incBg) bgLayer.visible(false);
 
-    // Hide/show symbols and lines; ALWAYS hide length labels
+    // Snapshot visibility, then apply checkbox overrides
+    var _savedVis = [];
     shapeLayer.getChildren().forEach(function (node) {
+      _savedVis.push([node, node.visible()]);
       if (node._isSym  && !incSym)   node.visible(false);
       if (node._isLine && !incLines) node.visible(false);
       if (node._isLineLabel)         node.visible(false);
@@ -3021,14 +3816,10 @@
     calLayer.visible(false);
 
     stage.toDataURL({ pixelRatio: 2, callback: function (dataUrl) {
-      // Restore
+      // Restore all nodes to their pre-export visibility
       bgLayer.visible(bgVis);
       calLayer.visible(calVis);
-      shapeLayer.getChildren().forEach(function (node) {
-        if (node._isSym  && !incSym)   node.visible(true);
-        if (node._isLine && !incLines) node.visible(true);
-        if (node._isLineLabel)         node.visible(true);
-      });
+      _savedVis.forEach(function (pair) { pair[0].visible(pair[1]); });
 
       var orient = stage.width() > stage.height() ? "l" : "p";
       var pdf = new JsPDF({ orientation: orient, unit: "mm", format: "a4" });
@@ -3169,6 +3960,19 @@
   // ─────────────────────────────────────────────────────────────────────
   // FEATURE 2 – MANUAL TAKEOFF ITEMS
   // ─────────────────────────────────────────────────────────────────────
+  var miSelectedPart = null;
+  function miSelectPart(p) {
+    miSelectedPart = p;
+    if (!$("miDesc").value)   $("miDesc").value   = p.description || "";
+    if (!$("miCost").value)   $("miCost").value   = p.cost   != null ? p.cost   : "";
+    if (!$("miRetail").value) $("miRetail").value = p.retail != null ? p.retail : "";
+    if (!$("miLabour").value && p.labour) $("miLabour").value = p.labour;
+    $("miSelectedPartLabel").textContent = p.part_no + (p.description ? "  —  " + p.description : "");
+    $("miSelectedPart").style.display = "flex";
+    $("miPartsResults").style.display = "none";
+    $("miPartsResults").innerHTML = "";
+    $("miPartSearch").value = "";
+  }
   function openManualItemModal(existing) {
     var ed = existing || {};
     $("miEditId").value  = ed.id || "";
@@ -3177,8 +3981,19 @@
     $("miUnit").value    = ed.unit || "ea";
     $("miCost").value    = ed.cost || "";
     $("miRetail").value  = ed.retail || "";
-    $("miLabour").value  = ed.labour || "";
+    $("miLabour").value  = (ed.labourPerUnit != null ? ed.labourPerUnit : ed.labour) || "";
     $("modalManualItem").querySelector("h2").textContent = ed.id ? "Edit manual item" : "Add manual item";
+    // reset search UI
+    miSelectedPart = ed.part || null;
+    $("miPartSearch").value = "";
+    $("miPartsResults").style.display = "none";
+    $("miPartsResults").innerHTML = "";
+    if (miSelectedPart) {
+      $("miSelectedPartLabel").textContent = miSelectedPart.part_no + (miSelectedPart.description ? "  —  " + miSelectedPart.description : "");
+      $("miSelectedPart").style.display = "flex";
+    } else {
+      $("miSelectedPart").style.display = "none";
+    }
     openModal("modalManualItem");
     setTimeout(function () { $("miDesc").focus(); }, 50);
   }
@@ -3190,12 +4005,13 @@
     state.manualTakeoff = state.manualTakeoff.filter(function (m) { return m.id !== id; });
     state.manualTakeoff.push({
       id: id,
+      part: miSelectedPart || null,
       description: desc,
-      qty:    parseFloat($("miQty").value)    || 0,
-      unit:   $("miUnit").value.trim()        || "ea",
-      cost:   parseFloat($("miCost").value)   || 0,
-      retail: parseFloat($("miRetail").value) || 0,
-      labour: parseFloat($("miLabour").value) || 0
+      qty:          parseFloat($("miQty").value)    || 0,
+      unit:         $("miUnit").value.trim()        || "ea",
+      cost:         parseFloat($("miCost").value)   || 0,
+      retail:       parseFloat($("miRetail").value) || 0,
+      labourPerUnit: parseFloat($("miLabour").value) || 0
     });
     closeModal("modalManualItem");
     refreshTakeoff();
@@ -3218,20 +4034,23 @@
     var extraCost = 0, extraRetail = 0, extraHrs = 0;
     var rows = '<tr class="group-head"><td colspan="6">Manual items</td></tr>';
     state.manualTakeoff.forEach(function (m) {
-      var mc = m.qty * m.cost, mr = m.qty * m.retail, lc = m.labour * rate;
-      extraCost   += mc; extraRetail += mr; extraHrs += m.labour;
-      rows += '<tr><td><span>' + escapeHtml(m.description) + '</span>' +
+      var lpu = m.labourPerUnit != null ? m.labourPerUnit : (m.labour || 0);
+      var lhrs = m.qty * lpu;
+      var mc = m.qty * m.cost, mr = m.qty * m.retail, lc = lhrs * rate;
+      extraCost   += mc; extraRetail += mr; extraHrs += lhrs;
+      var partLine = m.part ? '<br><span class="layer-part">' + escapeHtml(m.part.part_no) + '</span>' : "";
+      rows += '<tr><td><span>' + escapeHtml(m.description) + '</span>' + partLine +
         ' <a href="#" style="font-size:10px;color:var(--accent)" data-edit-mi="' + m.id + '">edit</a>' +
         ' <a href="#" style="font-size:10px;color:var(--red,#f87171)" data-del-mi="' + m.id + '">✕</a>' +
         '</td><td class="num">' + m.qty + ' ' + escapeHtml(m.unit) +
         '</td><td class="num">' + fmt$(mc) +
         '</td><td class="num">' + fmt$(mr) +
-        '</td><td class="num">' + m.labour.toFixed(2) +
+        '</td><td class="num">' + lhrs.toFixed(2) +
         '</td><td class="num">' + fmt$(lc) + '</td></tr>';
     });
     tbody.insertAdjacentHTML("beforeend", rows);
 
-    // Update subtotal row in tfoot
+    // Update subtotal row in tfoot and summary section below the table
     if (tfoot) {
       var cells = tfoot.querySelectorAll("td");
       // cells: [SUBTOTAL, empty, cost, retail, hrs, labour]
@@ -3244,6 +4063,20 @@
         cells[3].textContent = fmt$(origRetail + extraRetail);
         cells[4].textContent = (origHrs + extraHrs).toFixed(2);
         cells[5].textContent = fmt$(origLab    + extraHrs * rate);
+        // Also update the summary section below the table so it matches tfoot
+        var newMC  = origCost   + extraCost;
+        var newMR  = origRetail + extraRetail;
+        var newLab = origLab    + extraHrs * rate;
+        var newEC  = newMC  + newLab;
+        var newQ   = newMR  + newLab;
+        var newMG  = newQ   - newEC;
+        var sMC = $("toMC"), sMR = $("toMR"), sLab = $("toLab"), sEC = $("toEC"), sQ = $("toQ"), sMG = $("toMG");
+        if (sMC)  sMC.textContent  = fmt$(newMC);
+        if (sMR)  sMR.textContent  = fmt$(newMR);
+        if (sLab) sLab.textContent = fmt$(newLab);
+        if (sEC)  sEC.textContent  = fmt$(newEC);
+        if (sQ)   sQ.textContent   = fmt$(newQ);
+        if (sMG)  sMG.textContent  = fmt$(newMG) + (newQ ? '  (' + (newMG / newQ * 100).toFixed(1) + '%)' : "");
       }
     }
 
@@ -3487,8 +4320,10 @@
     if (!pkgComponents.length) { $("pkgMsg").textContent = "Add at least one component"; return; }
     var tc = 0, tr = 0;
     pkgComponents.forEach(function (c) { tc += (c.qty || 1) * (c.cost || 0); tr += (c.qty || 1) * (c.retail || 0); });
+    var existingPkg = (state.customParts || []).find(function (p) { return p.part_no === pno; });
     var pkg = { part_no: pno, description: name, unit: "ea", cost: tc, retail: tr,
-                labour: 0, category: "packages", _custom: true, isPackage: true,
+                labour: existingPkg ? (existingPkg.labour || 0) : 0,
+                category: "packages", _custom: true, isPackage: true,
                 components: JSON.parse(JSON.stringify(pkgComponents)) };
     state.customParts = (state.customParts || []).filter(function (p) { return p.part_no !== pno; });
     state.customParts.push(pkg);
@@ -3566,30 +4401,42 @@
     var routeRows = [];
     (state.sheets || []).forEach(function (sh) {
       (sh.routes || []).forEach(function (route) {
-        if (!route.straightPkgId && !route.cornerPkgId && !route.teePkgId) return;
+        if (!route.straightPkgId && !route.cornerPkgId && !route.teePkgId
+            && !route.corePkgId && !route.earthPkgId) return;
         var lengthM = route.lengthM || 0;
         var stickCount = lengthM > 0 ? Math.ceil(lengthM / (route.stickLengthM || 4)) : 0;
         var autoC = window.routeAutoCorners ? window.routeAutoCorners(route) : Math.max(0, Math.floor(route.points.length / 2) - 2);
         var cornerCount = (route.cornerCountOverride != null) ? route.cornerCountOverride : autoC;
         var teeCount = route.teeCount || 0;
-        var label = route.description || "Route";
+        var routeCirc = route.circuitId ? circuitById(route.circuitId) : null;
+        var label = route.description || (routeCirc ? routeCirc.name : "Cable Run");
         function expandInto(part, qty, slot) {
           if (!part || qty <= 0) return;
           var items = part.isPackage && part.components && part.components.length
             ? part.components.map(function (c) { return { part: c, qty: qty * (c.qty || 1) }; })
             : [{ part: part, qty: qty }];
           items.forEach(function (item) {
+            var autoHrs = item.qty * (item.part.labour || 0);
+            var ovKey = slot + "_" + item.part.part_no;
+            var ovVal = route.hrsOverrides && route.hrsOverrides[ovKey] != null ? route.hrsOverrides[ovKey] : null;
+            var effHrs = ovVal != null ? ovVal : autoHrs;
             routeRows.push({ kind: "route-bom", id: route.id + "_" + slot + "_" + item.part.part_no,
               name: label + " [" + slot + "]", part: item.part, unit: item.part.unit || "ea",
               autoQty: item.qty, effQty: item.qty, qtyOv: false,
-              autoHrs: 0, effHrs: 0, hrsOv: false,
+              autoHrs: autoHrs, effHrs: effHrs, hrsOv: ovVal != null,
               matCost: item.qty * (item.part.cost || 0), matRetail: item.qty * (item.part.retail || 0),
-              labour: 0, meta: "" });
+              labour: effHrs * (data.rate || 0), meta: "" });
           });
         }
         expandInto(findPart(route.straightPkgId), stickCount,  "straight");
         expandInto(findPart(route.cornerPkgId),   cornerCount, "corner");
         expandInto(findPart(route.teePkgId),       teeCount,   "tee");
+        if (route.singleCore) {
+          var coreQty  = lengthM > 0 ? lengthM * (route.coreCount || 3) : 0;
+          var earthQty = lengthM > 0 ? lengthM : 0;
+          expandInto(findPart(route.corePkgId),  coreQty,  "core");
+          expandInto(findPart(route.earthPkgId), earthQty, "earth");
+        }
       });
     });
     return { rows: data.rows.concat(routeRows), rate: data.rate };
@@ -3606,22 +4453,23 @@
     var tbody = $("tab-takeoff") && $("tab-takeoff").querySelector("tbody");
     if (!tbody) return;
 
-    // Collect all routes across all sheets
     var allRoutes = [];
     (state.sheets || []).forEach(function (sh) {
       (sh.routes || []).forEach(function (r) { allRoutes.push(r); });
     });
-    // Only show routes that have at least one package linked or a measured length
     var routesWithData = allRoutes.filter(function (r) {
-      return r.straightPkgId || r.cornerPkgId || r.teePkgId;
+      return r.straightPkgId || r.cornerPkgId || r.teePkgId || r.corePkgId || r.earthPkgId;
     });
     if (!routesWithData.length) return;
 
-    // Find any custom part or package by part_no
     function findPart(id) {
       if (!id) return null;
       return (state.customParts || []).find(function (p) { return p.part_no === id; });
     }
+
+    var routeRate = state ? (state.labourRate || 0) : 0;
+    var numStyle = "width:58px;text-align:right;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:3px 5px;color:var(--text);font-family:var(--mono);font-size:11px";
+    var ovStyle  = "width:58px;text-align:right;background:var(--bg);border:1px solid var(--accent);border-radius:5px;padding:3px 5px;color:var(--accent);font-family:var(--mono);font-size:11px";
 
     var html = '<tr class="group-head"><td colspan="6">Routes &amp; Conduit</td></tr>';
 
@@ -3633,43 +4481,92 @@
       var cornerCount = (route.cornerCountOverride != null) ? route.cornerCountOverride : autoCorners;
       var teeCount    = route.teeCount || 0;
 
-      var straightPart = findPart(route.straightPkgId);
-      var cornerPart   = findPart(route.cornerPkgId);
-      var teePart      = findPart(route.teePkgId);
-
-      var label = escapeHtml(route.description || "Route");
+      var linkedCirc = route.circuitId ? circuitById(route.circuitId) : null;
+      var label = escapeHtml(route.description || (linkedCirc ? linkedCirc.name : "Cable Run"));
+      if (linkedCirc && route.description) label += ' <span style="font-weight:400;color:var(--faint);font-size:10px">[' + escapeHtml(linkedCirc.name) + ']</span>';
       var meta  = lengthM > 0 ? lengthM.toFixed(2) + " m · " + stickCount + " sticks" : "no scale set";
       if (cornerCount) meta += " · " + cornerCount + " corners";
       if (teeCount)    meta += " · " + teeCount + " tees";
+      if (route.singleCore && lengthM > 0) {
+        var sc2 = route.coreCount || 3;
+        meta += " · " + sc2 + " cores × " + lengthM.toFixed(2) + "m + 1 earth";
+      }
+      var hasOv = route.hrsOverrides && Object.keys(route.hrsOverrides).some(function (k) { return route.hrsOverrides[k] != null; });
+      html += '<tr data-focus-kind="route" data-focus-id="' + route.id + '" style="cursor:pointer"><td colspan="6" style="font-size:11px;font-weight:600;color:var(--text);padding:5px 8px 2px;background:var(--bg-alt)">' +
+        label + ' <span style="font-weight:400;color:var(--faint);font-size:10px">' + meta + '</span>' +
+        (hasOv ? ' <a href="#" data-reset-route="' + route.id + '" style="font-size:10px;font-weight:400;color:var(--accent);margin-left:6px" title="Reset all hour overrides for this route">↺ reset hrs</a>' : '') +
+        '</td></tr>';
 
-      html += '<tr><td colspan="6" style="font-size:11px;font-weight:600;color:var(--text);padding:5px 8px 2px;background:var(--bg-alt)">' +
-        label + ' <span style="font-weight:400;color:var(--faint);font-size:10px">' + meta + '</span></td></tr>';
-
-      // Expand a part or package into BOM rows.
-      // Package: expand each component × qty. Single part: one row at qty.
-      function expandPart(part, qty, slotLabel) {
+      // slotKey = storage key prefix; slotLabel = display label
+      function expandPart(part, qty, slotKey, slotLabel) {
         if (!part || qty <= 0) return;
         var rows = part.isPackage && part.components && part.components.length
-          ? part.components.map(function (c) { return { desc: c.description, pno: c.part_no, unit: c.unit || "ea", cost: c.cost || 0, retail: c.retail || 0, qty: qty * (c.qty || 1) }; })
-          : [{ desc: part.description, pno: part.part_no, unit: part.unit || "ea", cost: part.cost || 0, retail: part.retail || 0, qty: qty }];
+          ? part.components.map(function (c) { return { desc: c.description, pno: c.part_no, unit: c.unit || "ea", cost: c.cost || 0, retail: c.retail || 0, labour: c.labour || 0, qty: qty * (c.qty || 1) }; })
+          : [{ desc: part.description, pno: part.part_no, unit: part.unit || "ea", cost: part.cost || 0, retail: part.retail || 0, labour: part.labour || 0, qty: qty }];
         rows.forEach(function (r) {
           var mc = r.qty * r.cost, mr = r.qty * r.retail;
+          var autoHrs = r.qty * r.labour;
+          var ovKey = slotKey + "_" + r.pno;
+          var ovVal = (route.hrsOverrides && route.hrsOverrides[ovKey] != null) ? route.hrsOverrides[ovKey] : null;
+          var effHrs = ovVal != null ? ovVal : autoHrs;
+          var lab = effHrs * routeRate;
+          var inpVal = (effHrs > 0 || ovVal != null) ? effHrs.toFixed(2) : "";
           html += '<tr><td style="padding-left:18px;font-size:11px">└ <span style="color:var(--faint);font-size:10px">[' + escapeHtml(slotLabel) + ']</span> ' +
             escapeHtml(r.desc) + ' <span style="color:var(--faint);font-size:10px">[' + escapeHtml(r.pno) + ']</span>' +
             '</td><td class="num">' + r.qty + ' ' + escapeHtml(r.unit) +
             '</td><td class="num">' + fmt$(mc) +
             '</td><td class="num">' + fmt$(mr) +
-            '</td><td class="num">—</td><td class="num">—</td></tr>';
+            '</td><td class="num"><input class="rte-hrs-inp" data-route-id="' + route.id + '" data-ov-key="' + escapeHtml(ovKey) + '" type="number" step="any" value="' + inpVal + '" placeholder="' + autoHrs.toFixed(2) + '" title="auto = ' + autoHrs.toFixed(2) + ' h · blank to reset" style="' + (ovVal != null ? ovStyle : numStyle) + '">' +
+            '</td><td class="num">' + (lab > 0 ? fmt$(lab) : '—') + '</td></tr>';
         });
       }
 
-      expandPart(straightPart, stickCount,  "straight ×" + stickCount);
-      expandPart(cornerPart,   cornerCount, "corner ×"   + cornerCount);
-      expandPart(teePart,      teeCount,    "tee ×"      + teeCount);
+      expandPart(findPart(route.straightPkgId), stickCount,  "straight", "straight ×" + stickCount);
+      expandPart(findPart(route.cornerPkgId),   cornerCount, "corner",   "corner ×"   + cornerCount);
+      expandPart(findPart(route.teePkgId),       teeCount,   "tee",      "tee ×"      + teeCount);
+      if (route.singleCore) {
+        var scCoreQty  = lengthM > 0 ? lengthM * (route.coreCount || 3) : 0;
+        var scEarthQty = lengthM > 0 ? lengthM : 0;
+        expandPart(findPart(route.corePkgId),  scCoreQty,  "core",  "core ×"  + scCoreQty.toFixed(2)  + "m");
+        expandPart(findPart(route.earthPkgId), scEarthQty, "earth", "earth ×" + scEarthQty.toFixed(2) + "m");
+      }
     });
 
     tbody.insertAdjacentHTML("beforeend", html);
-    // Totals are already included via takeoffRows() patch — no manual tfoot update needed.
+
+    function findRouteById(id) {
+      var found = null;
+      (state.sheets || []).forEach(function (sh) { (sh.routes || []).forEach(function (r) { if (r.id === id) found = r; }); });
+      return found;
+    }
+
+    tbody.querySelectorAll(".rte-hrs-inp").forEach(function (inp) {
+      inp.onchange = function () {
+        var route = findRouteById(this.dataset.routeId);
+        if (!route) return;
+        if (!route.hrsOverrides) route.hrsOverrides = {};
+        var v = this.value.trim() === "" ? null : parseFloat(this.value);
+        route.hrsOverrides[this.dataset.ovKey] = (v == null || isNaN(v)) ? null : v;
+        refreshTakeoff();
+      };
+    });
+
+    tbody.querySelectorAll("[data-reset-route]").forEach(function (a) {
+      a.onclick = function (e) {
+        e.preventDefault();
+        var route = findRouteById(this.dataset.resetRoute);
+        if (route) { route.hrsOverrides = {}; refreshTakeoff(); }
+      };
+    });
+
+    tbody.querySelectorAll('tr[data-focus-kind="route"]').forEach(function (tr) {
+      tr.addEventListener("click", function (e) {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "A" || e.target.closest("a")) return;
+        if (window.focusRoute) window.focusRoute(tr.dataset.focusId);
+      });
+      tr.addEventListener("mouseenter", function () { tr.style.background = "var(--accent-dim,rgba(56,189,248,.15))"; });
+      tr.addEventListener("mouseleave", function () { tr.style.background = "var(--bg-alt)"; });
+    });
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
@@ -3877,6 +4774,7 @@
     }
 
     wire("prop-refNo",      "refNo", function (v) {
+      sym.refNo = v;
       if (window.syncRefLabel) window.syncRefLabel(sym);
       return v;
     });
@@ -3890,6 +4788,7 @@
     });
     wire("prop-size",       "size", function (v) {
       var n = parseInt(v) || 30;
+      sym.size = n;
       var node = window.symbolNodes && window.symbolNodes[sym.id];
       if (node) { node.width(n); node.height(n); node.offsetX(n/2); node.offsetY(n/2); }
       if (window.syncRefLabel) window.syncRefLabel(sym);
@@ -3929,6 +4828,193 @@
       if (window.deleteSelected) window.deleteSelected();
       box.innerHTML = '<p style="color:var(--faint);padding:12px 8px;font-size:12px">Symbol deleted.</p>';
     };
+  };
+
+  // ── Multi-select properties panel ────────────────────────────────────
+  window.renderMultiPropertiesPanel = function (symIds, rteIds) {
+    symIds = symIds || []; rteIds = rteIds || [];
+    var box = $("tab-properties"); if (!box) return;
+    var sh = window.sheet ? window.sheet() : null; if (!sh) return;
+    var circuits = getCircuits();
+    var layers   = getLayers();
+
+    var syms   = symIds.map(function (id) { return sh.symbols.find(function (s) { return s.id === id; }); }).filter(Boolean);
+    var routes  = rteIds.map(function (id) { return (sh.routes || []).find(function (r) { return r.id === id; }); }).filter(Boolean);
+
+    if (!syms.length && !routes.length) { box.innerHTML = ""; return; }
+
+    var NO_CHANGE = "__no_change__";
+    var INP = 'style="width:100%;padding:6px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:12px;box-sizing:border-box"';
+    var LBL = 'style="display:block;font-size:11px;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px"';
+
+    function row(label, inner) {
+      return '<div style="margin-bottom:8px"><label ' + LBL + '>' + label + '</label>' + inner + '</div>';
+    }
+    function commonVal(arr, prop) {
+      var vals = arr.map(function (o) { return o[prop] != null ? String(o[prop]) : ""; });
+      return vals.length && vals.every(function (v) { return v === vals[0]; }) ? vals[0] : null;
+    }
+    function numField(id, cv, label) {
+      return row(label,
+        '<input id="' + id + '" type="number" value="' + (cv !== null ? escHtml(cv) : "") + '" ' +
+        'placeholder="' + (cv === null ? "(varies)" : "") + '" ' + INP + '>');
+    }
+    function selField(id, cv, optsHtml, label) {
+      var noChange = '<option value="' + NO_CHANGE + '">' + (cv === null ? '— (varies / no change) —' : '— no change —') + '</option>';
+      return row(label, '<select id="' + id + '" ' + INP + '>' + noChange + optsHtml + '</select>');
+    }
+    function circOpts(cv) {
+      var o = '<option value="">— none —</option>';
+      circuits.forEach(function (c) { o += '<option value="' + c.id + '"' + (cv === c.id ? ' selected' : '') + '>' + escHtml(c.name) + '</option>'; });
+      return o;
+    }
+    function layOpts(cv, noneLabel) {
+      var o = '<option value="">' + (noneLabel || '— not assigned —') + '</option>';
+      layers.forEach(function (l) { o += '<option value="' + l.id + '"' + (cv === l.id ? ' selected' : '') + '>' + escHtml(l.name) + '</option>'; });
+      return o;
+    }
+    function sectionHead(label, count, type) {
+      return '<div style="font-size:11px;color:var(--cyan);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px;margin-top:6px">' +
+        count + ' ' + type + (count !== 1 ? 's' : '') + ' selected</div>';
+    }
+    function divider() {
+      return '<div style="border-top:1px solid var(--border);margin:12px 0 10px"></div>';
+    }
+
+    var html = '<div style="padding:10px 8px">';
+
+    // ── Symbol section ──────────────────────────────────────────
+    if (syms.length) {
+      var cvSymCirc = commonVal(syms, "circuitId");
+      var cvSymLay  = commonVal(syms, "visibleLayerId");
+      html +=
+        sectionHead('Symbol', syms.length, 'symbol') +
+        row('Reference no.', '<input id="mprop-refNo" type="text" value="" placeholder="Set for all…" ' + INP + '>') +
+        selField('mprop-circuitId',  cvSymCirc, circOpts(cvSymCirc), 'Circuit') +
+        selField('mprop-visLayerId', cvSymLay,  layOpts(cvSymLay),   'Layer') +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+          numField('mprop-size',     commonVal(syms, "size"),     'Size (px)') +
+          numField('mprop-rotation', commonVal(syms, "rotation"), 'Rotation °') +
+        '</div>' +
+        numField('mprop-current', commonVal(syms, "currentContrib"), 'Load current (A)') +
+        '<button id="mprop-delete-syms" class="btn" style="width:100%;justify-content:center;color:var(--red,#f87171)">🗑 Delete symbols</button>';
+    }
+
+    // ── Route section ───────────────────────────────────────────
+    if (routes.length) {
+      var cvRteLay   = commonVal(routes, "layerId");
+      var cvRteCirc  = commonVal(routes, "circuitId");
+      var cvRteStick = commonVal(routes, "stickLengthM");
+      var cvRteCores = commonVal(routes, "coreCount");
+      if (syms.length) html += divider();
+      html +=
+        sectionHead('Route', routes.length, 'route') +
+        selField('mprop-rte-layerId',  cvRteLay,  layOpts(cvRteLay),  'Layer') +
+        selField('mprop-rte-circuitId', cvRteCirc, circOpts(cvRteCirc), 'Circuit') +
+        numField('mprop-rte-stick',  cvRteStick, 'Stick length (m)') +
+        numField('mprop-rte-cores',  cvRteCores, 'Core count') +
+        '<button id="mprop-delete-rtes" class="btn" style="width:100%;justify-content:center;color:var(--red,#f87171)">🗑 Delete routes</button>';
+    }
+
+    html += '</div>';
+    box.innerHTML = html;
+
+    // Restore select values (HTML pre-selects via 'selected' attr already; this catches edge cases)
+    function restoreSel(id, cv) { var el = $(id); if (el && cv !== null) el.value = cv || ""; }
+    if (syms.length)   { restoreSel('mprop-circuitId', commonVal(syms, "circuitId")); restoreSel('mprop-visLayerId', commonVal(syms, "visibleLayerId")); }
+    if (routes.length) { restoreSel('mprop-rte-layerId', commonVal(routes, "layerId")); restoreSel('mprop-rte-circuitId', commonVal(routes, "circuitId")); }
+
+    // ── Wire symbol fields ──────────────────────────────────────
+    function wireSyms(fieldId, prop, transform) {
+      var el = $(fieldId); if (!el) return;
+      el.onchange = function () {
+        var raw = el.value; if (raw === NO_CHANGE) return;
+        var val = transform ? transform(raw) : raw;
+        if (prop === "size" && (val == null || isNaN(val))) return;
+        if (window.pushUndo) window.pushUndo();
+        syms.forEach(function (s) { s[prop] = val === "" ? null : val; });
+        if (prop === "visibleLayerId") {
+          if (val) { var lay = layers.find(function (l) { return l.id === val; }); if (lay && window.applyLayerVisibility) window.applyLayerVisibility(lay); }
+          else { syms.forEach(function (s) { var n = window.symbolNodes && window.symbolNodes[s.id]; if (n) { n.visible(true); n.listening(true); } }); }
+          if (window.shapeLayer) window.shapeLayer.batchDraw();
+          if (window.renderLayers) window.renderLayers();
+        }
+        if (prop === "size") {
+          syms.forEach(function (s) { var n = window.symbolNodes && window.symbolNodes[s.id]; if (n) { n.width(val); n.height(val); n.offsetX(val/2); n.offsetY(val/2); } if (window.syncRefLabel) window.syncRefLabel(s); });
+          if (window.shapeLayer) window.shapeLayer.batchDraw();
+        }
+        if (prop === "rotation") {
+          syms.forEach(function (s) { var n = window.symbolNodes && window.symbolNodes[s.id]; if (n) n.rotation(val); });
+          if (window.shapeLayer) window.shapeLayer.batchDraw();
+        }
+        if (prop === "refNo") { syms.forEach(function (s) { if (window.syncRefLabel) window.syncRefLabel(s); }); }
+        if (prop === "circuitId" && window.renderCircuitsTable) window.renderCircuitsTable();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+      };
+    }
+    if (syms.length) {
+      wireSyms("mprop-refNo",      "refNo");
+      wireSyms("mprop-circuitId",  "circuitId");
+      wireSyms("mprop-visLayerId", "visibleLayerId");
+      wireSyms("mprop-size",       "size",           function (v) { return parseInt(v) || null; });
+      wireSyms("mprop-rotation",   "rotation",       function (v) { return parseFloat(v) || 0; });
+      wireSyms("mprop-current",    "currentContrib", function (v) { var n = parseFloat(v); return isNaN(n) ? null : n; });
+      var delSymsBtn = $("mprop-delete-syms");
+      if (delSymsBtn) delSymsBtn.onclick = function () {
+        if (!confirm("Delete " + syms.length + " symbol" + (syms.length !== 1 ? "s" : "") + "?")) return;
+        if (window.pushUndo) window.pushUndo();
+        var sh2 = window.sheet ? window.sheet() : null; if (!sh2) return;
+        syms.forEach(function (s) {
+          sh2.symbols = sh2.symbols.filter(function (x) { return x.id !== s.id; });
+          var n = window.symbolNodes && window.symbolNodes[s.id]; if (n) { n.destroy(); delete window.symbolNodes[s.id]; }
+          var rl = window.refLabelNodes && window.refLabelNodes[s.id]; if (rl) { rl.destroy(); delete window.refLabelNodes[s.id]; }
+        });
+        if (window.shapeLayer) window.shapeLayer.batchDraw();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+        if (window.renderMultiPropertiesPanel) window.renderMultiPropertiesPanel([], rteIds);
+      };
+    }
+
+    // ── Wire route fields ───────────────────────────────────────
+    function wireRoutes(fieldId, prop, transform) {
+      var el = $(fieldId); if (!el) return;
+      el.onchange = function () {
+        var raw = el.value; if (raw === NO_CHANGE) return;
+        var val = transform ? transform(raw) : raw;
+        if (window.pushUndo) window.pushUndo();
+        routes.forEach(function (r) { r[prop] = val === "" ? null : val; });
+        if (prop === "layerId") {
+          var lay = val ? layers.find(function (l) { return l.id === val; }) : null;
+          routes.forEach(function (r) {
+            var n = window.routeNodes && window.routeNodes[r.id];
+            if (n) { n.stroke(lay ? lay.color : "#38bdf8"); if (!n._useWorldWidth) n.visible(lay ? lay.visible !== false : true); }
+          });
+          if (window.shapeLayer) window.shapeLayer.batchDraw();
+          if (window.renderLayers) window.renderLayers();
+        }
+        if (prop === "circuitId" && window.renderCircuitsTable) window.renderCircuitsTable();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+      };
+    }
+    if (routes.length) {
+      wireRoutes("mprop-rte-layerId",   "layerId");
+      wireRoutes("mprop-rte-circuitId", "circuitId");
+      wireRoutes("mprop-rte-stick",     "stickLengthM", function (v) { return parseFloat(v) || 4; });
+      wireRoutes("mprop-rte-cores",     "coreCount",    function (v) { return parseInt(v) || 3; });
+      var delRtesBtn = $("mprop-delete-rtes");
+      if (delRtesBtn) delRtesBtn.onclick = function () {
+        if (!confirm("Delete " + routes.length + " route" + (routes.length !== 1 ? "s" : "") + "?")) return;
+        if (window.pushUndo) window.pushUndo();
+        var sh2 = window.sheet ? window.sheet() : null; if (!sh2) return;
+        routes.forEach(function (r) {
+          sh2.routes = (sh2.routes || []).filter(function (x) { return x.id !== r.id; });
+          var n = window.routeNodes && window.routeNodes[r.id]; if (n) { n.destroy(); delete window.routeNodes[r.id]; }
+        });
+        if (window.shapeLayer) window.shapeLayer.batchDraw();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+        if (window.renderMultiPropertiesPanel) window.renderMultiPropertiesPanel(symIds, []);
+      };
+    }
   };
 
   function propRow(label, id, val, type, hintOrOpts) {
@@ -4095,7 +5181,7 @@
     var addBtn = $("addCircuitBtn");
     if (addBtn) addBtn.onclick = function () {
       var n = getCircuits().length + 1;
-      getState().circuits.push({ id: uid_c(), name: "Circuit " + n, cbRating: "", cableSize: "", cableCores: "", cableType: "", notes: "" });
+      getState().circuits.push({ id: uid_c(), name: "Circuit " + n, cbRating: "", cableSize: "", cableCores: "", cableType: "", notes: "", derateMethod: "insulation", derateInsul: "v90", derateBunched: 1, derateAmbient: 40 });
       renderCircuitsTable();
       if (window._selectedSym) renderPropertiesPanel(window._selectedSym);
     };
@@ -4261,15 +5347,27 @@
       var ac  = window.routeAutoCorners ? window.routeAutoCorners(route) : Math.max(0, Math.floor(route.points.length / 2) - 2);
       var cc  = (route.cornerCountOverride != null) ? route.cornerCountOverride : ac;
       var tc  = route.teeCount || 0;
-      return { lm: lm, sc: sc, ac: ac, cc: cc, tc: tc };
+      var scn = route.singleCore || false;
+      var cnt = route.coreCount || 3;
+      return { lm: lm, sc: sc, ac: ac, cc: cc, tc: tc,
+        singleCore: scn, coreCount: cnt,
+        coreQty:  (scn && lm > 0) ? lm * cnt : null,
+        earthQty: (scn && lm > 0) ? lm : null };
     }
 
     function statsHtml(s) {
+      var statCell = function (label, val) {
+        return '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">' + label + '</div><div style="font-size:13px;font-weight:600">' + val + '</div></div>';
+      };
       return '<div id="rte-stats" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">' +
-        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Length</div><div style="font-size:13px;font-weight:600">' + (s.lm != null ? s.lm.toFixed(2) + ' m' : '<span style="color:var(--faint)">no scale</span>') + '</div></div>' +
-        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Sticks</div><div style="font-size:13px;font-weight:600">' + (s.sc != null ? s.sc : '—') + '</div></div>' +
-        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Corners <span style="font-size:9px">(auto ' + s.ac + ')</span></div><div style="font-size:13px;font-weight:600">' + s.cc + '</div></div>' +
-        '<div style="background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;padding:6px 8px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Tees</div><div style="font-size:13px;font-weight:600">' + s.tc + '</div></div>' +
+        statCell('Length', s.lm != null ? s.lm.toFixed(2) + ' m' : '<span style="color:var(--faint)">no scale</span>') +
+        statCell('Sticks', s.sc != null ? s.sc : '—') +
+        statCell('Corners <span style="font-size:9px">(auto ' + s.ac + ')</span>', s.cc) +
+        statCell('Tees', s.tc) +
+        (s.singleCore
+          ? statCell('Cores total', s.coreQty != null ? s.coreQty.toFixed(2) + ' m' : '—') +
+            statCell('Earth total', s.earthQty != null ? s.earthQty.toFixed(2) + ' m' : '—')
+          : '') +
         '</div>';
     }
 
@@ -4300,11 +5398,61 @@
         '</div>';
     }
 
+    function layerSelectorHtml() {
+      var st = getState(); if (!st) return '';
+      var layers = (st.layers || []);
+      if (!layers.length) return '';
+      var opts = layers.map(function (l) {
+        return '<option value="' + escHtml(l.id) + '"' + (route.layerId === l.id ? ' selected' : '') + '>' +
+          escHtml(l.name) + '</option>';
+      }).join('');
+      var cur = layers.find(function (l) { return l.id === route.layerId; });
+      return '<div style="margin-bottom:10px">' +
+        '<label style="display:block;font-size:11px;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Layer</label>' +
+        '<div style="display:flex;align-items:center;gap:6px">' +
+          (cur ? '<span style="width:12px;height:12px;border-radius:3px;background:' + cur.color + ';flex:none;border:1px solid rgba(255,255,255,.2)"></span>' : '') +
+          '<select id="rte-layer" style="flex:1;padding:6px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:12px">' +
+            '<option value="">— unassigned —</option>' + opts +
+          '</select>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function circuitSelectorHtml() {
+      var circuits = getCircuits();
+      var opts = '<option value="">— none —</option>';
+      circuits.forEach(function (c) {
+        var spec = [c.cbRating, c.cableSize, c.cableCores ? c.cableCores + 'C' : '', c.cableType].filter(Boolean).join(' · ');
+        opts += '<option value="' + escHtml(c.id) + '"' + (route.circuitId === c.id ? ' selected' : '') + '>' +
+          escHtml(c.name) + (spec ? ' (' + escHtml(spec) + ')' : '') + '</option>';
+      });
+      var linked = route.circuitId ? circuitById(route.circuitId) : null;
+      var infoHtml = '';
+      if (linked) {
+        var parts = [
+          linked.cbRating  ? 'CB: ' + linked.cbRating  : '',
+          linked.cableSize ? linked.cableSize           : '',
+          linked.cableCores ? linked.cableCores + ' cores' : '',
+          linked.cableType ? linked.cableType           : ''
+        ].filter(Boolean);
+        if (parts.length) infoHtml =
+          '<div id="rte-circuit-info" style="margin-top:5px;padding:5px 8px;background:var(--bg-alt);border:1px solid var(--accent);border-radius:5px;font-size:11px;color:var(--text)">' +
+          parts.join(' · ') + '</div>';
+      }
+      if (!infoHtml) infoHtml = '<div id="rte-circuit-info" style="display:none"></div>';
+      return '<div style="margin-bottom:10px">' +
+        '<label style="display:block;font-size:11px;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Circuit</label>' +
+        '<select id="rte-circuit" style="width:100%;padding:6px 8px;background:var(--bg-alt);border:1px solid var(--border);border-radius:5px;color:var(--text);color-scheme:dark;font-size:12px;box-sizing:border-box">' +
+        opts + '</select>' + infoHtml + '</div>';
+    }
+
     var s0 = calcStats();
     box.innerHTML =
       '<div style="padding:10px 8px">' +
-      '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">Route / Conduit</div>' +
+      '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">Cable Run</div>' +
+      layerSelectorHtml() +
       statsHtml(s0) +
+      circuitSelectorHtml() +
       field("Description", "rte-desc", route.description || "", "text", "e.g. 100mm Cable Tray") +
       field("Width (mm, 0 = thin line)", "rte-lw", route.lineWidthM > 0 ? Math.round(route.lineWidthM * 1000) : 0, "number", "0", ' step="10" min="0" max="2000"') +
       field("Stick / section length (m)", "rte-stick", route.stickLengthM || 4, "number", "4.0", ' step="0.1" min="0.1"') +
@@ -4319,6 +5467,17 @@
         pickerHtml("Straight (per stick)",  "rte-str", route.straightPkgId) +
         pickerHtml("Corner (per corner)",   "rte-cor", route.cornerPkgId) +
         pickerHtml("Tee (per tee)",         "rte-tee", route.teePkgId) +
+      '</div>' +
+      '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
+        '<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;cursor:pointer;margin-bottom:0">' +
+          '<input type="checkbox" id="rte-singlecore"' + (route.singleCore ? ' checked' : '') + '>' +
+          'Single core cables' +
+        '</label>' +
+        '<div id="rte-sc-panel" style="display:' + (route.singleCore ? 'block' : 'none') + ';margin-top:10px">' +
+          field("Cores (active + neutral)", "rte-cores", route.coreCount || 3, "number", "3", ' min="1" step="1"') +
+          pickerHtml("Active/Neutral cores (per metre × N)", "rte-cop", route.corePkgId) +
+          pickerHtml("Earth core (per metre × 1)", "rte-eap", route.earthPkgId) +
+        '</div>' +
       '</div>' +
       '<button class="btn" style="width:100%;justify-content:center;margin-top:12px;color:var(--red,#f87171)" id="rte-delete">🗑 Delete route</button>' +
       '</div>';
@@ -4338,6 +5497,58 @@
         if (window.refreshTakeoff) window.refreshTakeoff();
       };
     }
+    // Layer selector
+    var layEl = $("rte-layer");
+    if (layEl) layEl.onchange = function () {
+      route.layerId = layEl.value || null;
+      // Update the colour swatch next to the dropdown
+      var st2 = getState();
+      var cur = (st2 && st2.layers || []).find(function (l) { return l.id === route.layerId; });
+      var swatch = layEl.previousElementSibling;
+      if (swatch && swatch.tagName === "SPAN") swatch.style.background = cur ? cur.color : "transparent";
+      // Update the route's stroke colour on the canvas
+      if (window.routeNodes && window.routeNodes[route.id]) {
+        window.routeNodes[route.id].stroke(cur ? cur.color : "#38bdf8");
+        if (window.shapeLayer) window.shapeLayer.batchDraw();
+      }
+      if (window.renderLayers) window.renderLayers();
+      if (window.refreshTakeoff) window.refreshTakeoff();
+    };
+
+    // Circuit selector
+    var circEl = $("rte-circuit");
+    if (circEl) circEl.onchange = function () {
+      route.circuitId = circEl.value || null;
+      // Update info card
+      var info = $("rte-circuit-info");
+      var linked = route.circuitId ? circuitById(route.circuitId) : null;
+      if (info) {
+        if (linked) {
+          var parts = [
+            linked.cbRating   ? 'CB: ' + linked.cbRating   : '',
+            linked.cableSize  ? linked.cableSize            : '',
+            linked.cableCores ? linked.cableCores + ' cores': '',
+            linked.cableType  ? linked.cableType            : ''
+          ].filter(Boolean);
+          info.textContent = parts.join(' · ');
+          info.style.display = '';
+        } else {
+          info.style.display = 'none';
+        }
+      }
+      // Auto-fill core count if single-core mode is active and circuit specifies cores
+      if (route.singleCore && linked) {
+        var n = parseInt(linked.cableCores);
+        if (n > 0) {
+          route.coreCount = n;
+          var coresEl = $("rte-cores");
+          if (coresEl) coresEl.value = n;
+        }
+      }
+      refreshStats();
+      if (window.refreshTakeoff) window.refreshTakeoff();
+    };
+
     wireField("rte-desc", "description");
     wireField("rte-stick", "stickLengthM", function (v) { return parseFloat(v) || 4; });
     var lwEl = $("rte-lw"); if (lwEl) { lwEl.onchange = function () {
@@ -4371,6 +5582,13 @@
             d.onmousedown  = function (e) {
               e.preventDefault(); // prevent blur before click
               route[routeProp] = p.part_no;
+              // Cache the full part object so findPart() can resolve DB parts in takeoff
+              if (state) {
+                state.customParts = state.customParts || [];
+                if (!state.customParts.find(function (x) { return x.part_no === p.part_no; })) {
+                  state.customParts.push(p);
+                }
+              }
               // Update badge
               var badge = $(slotId + "-badge");
               if (badge) badge.outerHTML =
@@ -4412,6 +5630,23 @@
     wireClear("rte-str", "straightPkgId");
     wireClear("rte-cor", "cornerPkgId");
     wireClear("rte-tee", "teePkgId");
+
+    // Single core cable controls
+    var scCb  = $("rte-singlecore");
+    var scPnl = $("rte-sc-panel");
+    if (scCb && scPnl) {
+      scCb.onchange = function () {
+        route.singleCore = scCb.checked;
+        scPnl.style.display = scCb.checked ? "block" : "none";
+        refreshStats();
+        if (window.refreshTakeoff) window.refreshTakeoff();
+      };
+    }
+    wireField("rte-cores", "coreCount", function (v) { return Math.max(1, parseInt(v) || 3); });
+    setupPicker("rte-cop", "corePkgId");
+    setupPicker("rte-eap", "earthPkgId");
+    wireClear("rte-cop", "corePkgId");
+    wireClear("rte-eap", "earthPkgId");
 
     var delBtn = $("rte-delete");
     if (delBtn) delBtn.onclick = function () {

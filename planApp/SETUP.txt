@@ -3,19 +3,5 @@ PLANAPP - QUICK START
 
 SETUP (3 commands):
   python3 fetch_vendor.py
-  python3 server.py
-  
-OPEN:
-  http://localhost:8000
-
-FEATURES INCLUDED:
-  1. Export plans to PDF (📄 PDF button)
-  2. Add manual items to takeoff (➕ button)
-  3. Edit layer names (console: editLayerName)
-  4. Assign symbols to layers (console: assignSymbolToLayer)
-  5. Custom symbols & DWG import (+ button in symbols)
-  6. Packaged parts (console: createPackagedPart)
-
-See FEATURES.txt for detailed documentation.
-
-That's it! App is ready to use.
+Run:  python3 server.py [--host 0.0.0.0] [--port 8000]
+Then open http://<server-ip>/ (or :80) in a browser.

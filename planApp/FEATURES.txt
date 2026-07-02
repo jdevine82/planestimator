@@ -1,175 +1,129 @@
-PLANAPP - 6 INTEGRATED FEATURES
-================================
+THE DEVINE ESTIMATOR — FEATURE SUMMARY
+=======================================
 
-FEATURE 1: EXPORT MARKED-UP PLANS TO PDF
-=========================================
-Export your marked-up plan with all symbols, lines, and layers as PDF.
+All features are accessed through the browser UI. No console commands required.
 
-How to use:
-1. Mark up your plan (add symbols, draw lines)
-2. Click "📄 PDF" button in header
-3. Choose what to include:
-   - Background image (original plan)
-   - Symbols (devices you placed)
-   - Lines (cable runs you drew)
-4. Click "Export"
-5. PDF downloads with all markup
+PLAN CANVAS
+-----------
+- Upload PDF or image as a plan background (drag-and-drop or sheet ＋ button)
+- Multi-page PDF import (one sheet per page)
+- Calibrate scale: press C, click two known points, type the real distance
+- Pan (Space + drag or middle-click), zoom (scroll wheel)
+- Background opacity slider per sheet (10–100%)
 
-In code:
-  exportPlantoPDF({
-    bg: true,      // include background
-    symbols: true, // include symbols
-    lines: true    // include lines
-  });
+SYMBOLS
+-------
+- Built-in palette: Electrical, Data/Comms, HVAC, Mechanical categories
+- Place symbols: press S, click on plan
+- Right-click palette symbol (or use takeoff link) to open Symbol Defaults:
+    Labour hours per unit, cable drop (m per device → target layer),
+    default current (A, for circuit load estimation), palette layer group
+- Draw custom symbols in-app: shapes (rect, ellipse, line, text), stroke/fill,
+  real-world mm dimensions for auto-sizing on calibrated plans
+- Upload custom symbols (PNG or SVG)
+- Import symbols from DXF files (LINE, ARC, CIRCLE, LWPOLYLINE, TEXT parsed to SVG)
+- Custom symbols stored in shared server library — available across all projects
+- Per-instance part override: assign a different part to a single placed symbol
+  without affecting all others of the same type
+- Reference number labels (e.g. GPO-01) shown beneath symbols on the canvas
+- Marquee multi-select: drag to select many symbols, move or reassign as a group
+- Symbol palette filter by layer group
 
----
+CABLE RUNS & ROUTES
+-------------------
+- Draw cable runs: press L, click points, double-click or Enter to finish
+- Runs measure scaled lengths automatically (shown on the line)
+- Cable Route tool (press R): draw conduit/trunking/tray runs costed by
+  stick count, corner count, and tee count rather than length
+  - Assign straight, corner, and tee packages to each route
+  - Auto-detects corners; manual override available
+- Layers: each layer has a name, colour, linked cable part, labour hrs/m rate
+  - Add/rename/recolour/show-hide layers
+  - Layers feed directly into the takeoff (length × part cost, length × hrs/m)
 
-FEATURE 2: ADD MANUAL ITEMS TO TAKEOFF
-======================================
-Add items that aren't on the plan (supervision, testing, contingency, etc).
+CIRCUITS (⚡)
+-------------
+- Define circuits: name, CB rating, cable size, cores, cable type
+- Assign symbols to circuits via Properties panel
+- Auto-calculated per circuit (live):
+    Cable ampacity (derated, AS/NZS 3008.1.1)
+    Voltage drop % (AS/NZS 3008.1.1 Table 30, flagged >5%)
+    Circuit load A (AS/NZS 3000 Table C9)
+    ELFI Zint Ω (AS/NZS 3000 Appendix B)
+    Lmax one-way route length m (AS/NZS 3000 B5.2.2, Type C MCB)
+- Route length auto-calculated from measured lines + symbol drops on linked layers
+- Derating settings per circuit or all circuits: installation method, insulation
+  rating, grouping factor, ambient/ground temperature
+- Printable circuit schedule (formatted, colour-coded pass/fail)
 
-How to use:
-1. Click "Parts Library" tab on right
-2. Click "➕ Add manual item"
-3. Enter:
-   - Description (e.g. "Site supervision")
-   - Quantity (e.g. 20)
-   - Unit (e.g. "hours", "ea", "m")
-   - Cost price (per unit)
-   - Retail price (per unit)
-   - Labour hours (optional)
-4. Click "Add Item"
-5. Item appears in takeoff under "Manual Items"
+PARTS DATABASE
+--------------
+- Connect to SQLite (.db/.sqlite) or CSV parts file via Settings
+- Column mapping: part_no, description, cost, retail, unit, category
+- Save & test: confirms connection and column validity
+- Parts Database Editor: search, add, edit, delete rows in-app
+- Import parts from CSV (bulk upsert — adds new, updates cost/retail on existing)
+- Sync from ServiceM8: pulls active materials list into local SQLite database
+- Custom parts: add one-off parts directly to the current project
+- Packaged parts: multi-component assemblies with a name, part number, and
+  component list (each with qty, cost, retail). Linked to symbols like any part.
+  Stored in shared database — available across all projects.
 
-In code:
-  addManualItem(
-    "Site supervision",  // description
-    20,                  // quantity
-    "hours",            // unit
-    50,                 // cost per unit
-    85,                 // retail per unit
-    0                   // labour hours
-  );
+TAKEOFF
+-------
+- Live totals across all sheets: device counts, cable lengths, labour, costs
+- Devices grouped by part number in the takeoff display
+- Cable runs grouped by layer
+- Wastage % and global labour rate ($/hr) adjustable at top of panel
+- Qty and Hrs cells editable per row; ↺ button resets to auto-calculated value
+- Cable drop per symbol: drop length added to target layer's total automatically
+- Manual takeoff items: description, qty, unit, cost, retail, labour hours
+  (optionally linked to a database part for auto-fill)
+- Packaged parts: shown as single line (price + hours); component sub-rows
+  listed with quantities and "Incl." in the amount column (no double-counting)
+- Consolidate exports checkbox: when ticked, rows with the same part number
+  and unit are merged into one line in the CSV and printable quote
+- Add manual item button
 
-Remove item:
-  removeManualItem("item_id");
+EXPORTS
+-------
+- Printable quote (new browser tab, print/save as PDF):
+    Business details, client, quote number, GST %, cost or retail pricing
+    Package components shown as sub-rows (Incl.) beneath the package line
+- Export takeoff CSV: all line items with section, part number, description,
+  qty, unit cost, unit retail, material cost/retail, labour hours, labour cost
+- Export marked-up plan to PDF: choose background / symbols / lines to include
+- Export to ServiceM8: creates a Quote job with one line per part number + labour
+- Print circuit schedule: formatted A4-ready circuit table
 
----
+PROJECTS & FOLDERS
+------------------
+- Save dialog: choose project name and folder separately
+    Folder field autocompletes from existing folder names
+    Use / for nested folders (e.g. Client A/2024)
+    Preview shows full path before saving
+- Open dialog: collapsible folder tree (📁 headers toggle open/closed)
+    Click a project to load it
+    ✎ button to move/rename a project to a new path
+    🗑 button to delete (with confirmation)
+- Folders are real sub-directories in projects/ on the server
+- Empty folders are removed automatically after the last project is deleted or moved
+- Backup ZIP preserves folder structure; restore recreates it
 
-FEATURE 3: EDIT LAYER NAMES
-===========================
-Rename layers to be clearer (e.g. "Layer1" → "Mains Power").
+BACKUP & RESTORE (Settings panel)
+----------------------------------
+- Download parts database (.db file)
+- Download all projects as ZIP (includes folder structure + symbol definitions)
+- Restore database: upload .db to replace current
+- Restore projects: upload ZIP to restore project files and folder layout
 
-How to use:
-Open browser console (F12) and type:
-  editLayerName("layer_id", "New Name");
-
-Example:
-  editLayerName("layer_abc123", "Data Cabling");
-
-The layer name updates everywhere:
-- In the left panel
-- In the takeoff
-- In the PDF legend
-
----
-
-FEATURE 4: ADD SYMBOLS TO SPECIFIC LAYERS
-==========================================
-Assign symbols to layers for better organization.
-
-How to use:
-Open browser console (F12) and type:
-  assignSymbolToLayer("symbol_type", "layer_id");
-
-Example:
-  assignSymbolToLayer("gpo_single", "layer_power");
-
-This helps track which devices are part of which cable run.
-
----
-
-FEATURE 5: CUSTOM SYMBOLS & DWG IMPORT
-======================================
-Add your own symbol graphics or import from DWG libraries.
-
-How to use:
-1. Click "+" button in Symbols panel
-2. Enter symbol name
-3. Choose category
-4. Upload image (PNG/SVG recommended)
-5. Click "Add symbol"
-6. Symbol appears in palette
-
-For DWG files:
-1. Convert DWG to PNG/SVG using:
-   - Online: cloudconvert.com, zamzar.com
-   - Desktop: LibreCAD (free), AutoCAD (paid)
-2. Upload the converted image as custom symbol
-
-In code (advanced):
-  importSymbolImage(
-    "Variable Frequency Drive",  // name
-    "electrical",                // category
-    "data:image/png;base64,..."  // image data
-  );
-
----
-
-FEATURE 6: PACKAGED PARTS
-=========================
-Create multi-component assemblies under one symbol.
-
-Example: A switchboard package containing:
-- 1× Distribution board unit ($150)
-- 6× RCDs ($24 each = $144)
-- 3× MCBs ($12 each = $36)
-- 1× Busbar assembly ($45)
-- 10× Terminal blocks ($2 each = $20)
-= Total package: $395
-
-How to use:
-Open browser console (F12) and type:
-  var components = [
-    { part: part_obj_1, qty: 1 },
-    { part: part_obj_2, qty: 6 },
-    { part: part_obj_3, qty: 3 },
-    // ... more components
-  ];
-  
-  createPackagedPart(
-    "Distribution Board",
-    "6-way board with RCDs and MCBs",
-    components
-  );
-
-The package:
-- Acts as a single item in takeoff
-- Shows total cost ($395 in example)
-- Shows full component breakdown in quote
-- Can be reused across projects
-
-Get all packages:
-  var packages = getPackagedParts();
-
----
-
-USAGE SUMMARY
-=============
-
-BUTTONS (in UI):
-- "📄 PDF" button → Export to PDF
-- "➕ Add manual item" → Add manual takeoff item
-
-CONSOLE COMMANDS (F12):
-- exportPlantoPDF({bg, symbols, lines})
-- addManualItem(desc, qty, unit, cost, retail, labour)
-- removeManualItem(id)
-- editLayerName(layerId, newName)
-- assignSymbolToLayer(symbolType, layerId)
-- importSymbolImage(name, category, imageData)
-- createPackagedPart(name, description, components)
-- getPackagedParts()
-
-ALL 6 FEATURES FULLY INTEGRATED!
-=================================
+OTHER
+-----
+- Undo/redo: up to 50 snapshots (Ctrl+Z / Ctrl+Y)
+- Text annotations on canvas (press T)
+- Measure tool — spot-check distances without adding to takeoff (press M)
+- Missing symbol restore: when a project uses a symbol no longer in the library,
+  a dialog offers to restore it to the library or keep it for this session only
+- Offline mode: run fetch_vendor.py once to bundle Konva + pdf.js locally
+- No third-party Python packages required
+- No authentication (run behind firewall/VPN)

@@ -18,7 +18,9 @@ import shutil
 import sqlite3
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -81,6 +83,7 @@ DEFAULT_CONFIG = {
         "category": "category",
         "labour": "labour",
     },
+    "servicem8ApiKey": "",
 }
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -126,6 +129,7 @@ def load_config():
             cfg["table"] = saved.get("table", cfg["table"])
             if isinstance(saved.get("columns"), dict):
                 cfg["columns"].update(saved["columns"])
+            cfg["servicem8ApiKey"] = saved.get("servicem8ApiKey", "")
         except Exception as exc:  # noqa: BLE001
             print("WARN: could not read config.json:", exc)
     return cfg
@@ -286,27 +290,59 @@ def query_parts(cfg, search="", limit=100):
 # --------------------------------------------------------------------------- #
 #  Projects (one JSON file per project)
 # --------------------------------------------------------------------------- #
-_SAFE_NAME = re.compile(r"[^A-Za-z0-9 _\-().]+")
+_SAFE_SEG = re.compile(r"[^A-Za-z0-9 _\-().]+")
 
 
 def safe_project_name(name):
+    """Sanitize a project name/path.  '/' is preserved as a folder separator."""
     name = (name or "").strip()
-    name = _SAFE_NAME.sub("_", name)
-    return name[:120] or "untitled"
+    parts = []
+    for seg in name.split("/"):
+        seg = _SAFE_SEG.sub("_", seg).strip()
+        if seg and seg.strip("."):   # skip empty and all-dot segments (prevents ../)
+            parts.append(seg)
+    return "/".join(parts)[:200] or "untitled"
 
 
 def project_path(name):
-    return os.path.join(PROJECTS_DIR, safe_project_name(name) + ".json")
+    safe = safe_project_name(name)
+    full = os.path.normpath(
+        os.path.join(PROJECTS_DIR, safe.replace("/", os.sep) + ".json")
+    )
+    # Guard against path-traversal even after sanitisation
+    if not full.startswith(os.path.normpath(PROJECTS_DIR) + os.sep):
+        raise ValueError("Invalid project path")
+    return full
+
+
+def _cleanup_empty_dirs(dirpath):
+    """Walk up from dirpath removing empty directories until PROJECTS_DIR."""
+    base = os.path.normpath(PROJECTS_DIR)
+    while True:
+        dirpath = os.path.normpath(dirpath)
+        if dirpath == base:
+            break
+        try:
+            if os.listdir(dirpath):
+                break
+            os.rmdir(dirpath)
+            dirpath = os.path.dirname(dirpath)
+        except OSError:
+            break
 
 
 def list_projects():
     out = []
-    for fn in sorted(os.listdir(PROJECTS_DIR)):
-        if fn.endswith(".json"):
-            full = os.path.join(PROJECTS_DIR, fn)
+    for root, dirs, files in os.walk(PROJECTS_DIR):
+        dirs.sort()
+        for fn in sorted(files):
+            if not fn.endswith(".json"):
+                continue
+            full = os.path.join(root, fn)
+            rel  = os.path.relpath(full, PROJECTS_DIR).replace(os.sep, "/")
             out.append(
                 {
-                    "name": fn[:-5],
+                    "name": rel[:-5],   # strip .json
                     "modified": os.path.getmtime(full),
                     "size": os.path.getsize(full),
                 }
@@ -329,32 +365,38 @@ def _pkg_con():
         "part_no TEXT PRIMARY KEY, description TEXT, category TEXT,"
         " cost REAL, retail REAL, components TEXT)"
     )
+    # Migrate: add labour column if it doesn't exist yet
+    try:
+        con.execute("ALTER TABLE packages ADD COLUMN labour REAL DEFAULT 0.0")
+    except Exception:
+        pass  # column already exists
     con.commit()
     return con
 
 def db_load_packages():
     con = _pkg_con()
     rows = con.execute(
-        "SELECT part_no, description, category, cost, retail, components FROM packages"
+        "SELECT part_no, description, category, cost, retail, labour, components FROM packages"
     ).fetchall()
     out = []
     for r in rows:
         try:
-            comps = json.loads(r[5]) if r[5] else []
+            comps = json.loads(r[6]) if r[6] else []
         except Exception:
             comps = []
         out.append({"part_no": r[0], "description": r[1], "category": r[2],
-                    "cost": r[3] or 0, "retail": r[4] or 0,
+                    "cost": r[3] or 0, "retail": r[4] or 0, "labour": r[5] or 0,
                     "components": comps, "isPackage": True, "_custom": True, "unit": "ea"})
     return out
 
 def db_upsert_package(pkg):
     con = _pkg_con()
     con.execute(
-        "INSERT OR REPLACE INTO packages (part_no, description, category, cost, retail, components)"
-        " VALUES (?,?,?,?,?,?)",
+        "INSERT OR REPLACE INTO packages (part_no, description, category, cost, retail, labour, components)"
+        " VALUES (?,?,?,?,?,?,?)",
         [pkg.get("part_no",""), pkg.get("description",""), pkg.get("category","packages"),
          float(pkg.get("cost",0) or 0), float(pkg.get("retail",0) or 0),
+         float(pkg.get("labour",0) or 0),
          json.dumps(pkg.get("components", []))]
     )
     con.commit()
@@ -536,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
                         {k: ("" if v is None else str(v).strip())
                          for k, v in body["columns"].items()}
                     )
+                if "servicem8ApiKey" in body:
+                    cfg["servicem8ApiKey"] = str(body.get("servicem8ApiKey", "")).strip()
                 save_config(cfg)
                 result = {"ok": True, "dbExists": os.path.exists(cfg["dbPath"])}
                 # validate by attempting a tiny query
@@ -554,6 +598,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_error_json("Project name required")
                 data = body.get("data", {})
                 p = project_path(name)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
                 payload = {"name": safe_project_name(name), "savedAt": time.time(), "data": data}
                 tmp = p + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
@@ -605,6 +650,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._restore_database()
             if path == "/api/restore/projects":
                 return self._restore_projects()
+            if path == "/api/sync-servicem8":
+                return self._sync_servicem8()
+            if path == "/api/create-sm8-quote":
+                body = self._read_body()
+                return self._create_sm8_quote(body)
             return self._send_error_json("Unknown endpoint", 404)
         except Exception as exc:  # noqa: BLE001
             return self._send_error_json(exc, 500)
@@ -656,8 +706,10 @@ class Handler(BaseHTTPRequestHandler):
 
         idx_part   = find_col("item number", "part_no", "part no", "partno", "sku", "code")
         idx_name   = find_col("name", "description", "desc")
-        idx_cost   = find_col("purchase cost", "cost", "buy price", "cost price")
-        idx_retail = find_col("price", "retail", "sell price", "retail price")
+        idx_cost   = find_col("purchase cost", "buy price", "unit cost", "cost price",
+                               "buy_price", "unit_cost", "cost")
+        idx_retail = find_col("sell price", "unit price", "retail price", "price",
+                               "sell_price", "unit_price", "retail")
 
         if idx_part is None or idx_name is None:
             return self._send_error_json(
@@ -718,8 +770,252 @@ class Handler(BaseHTTPRequestHandler):
         con.commit()
         return self._send_json({
             "ok": True, "added": added, "updated": updated, "skipped": skipped, "total": total,
-            "progress": progress
+            "progress": progress,
+            "_cols": raw_header,           # actual CSV headers — visible in devtools
+            "_cost_col":   raw_header[idx_cost]   if idx_cost   is not None else None,
+            "_retail_col": raw_header[idx_retail] if idx_retail is not None else None,
         })
+
+    def _sync_servicem8(self):
+        """Sync materials from ServiceM8 into the local parts database.
+
+        Calls GET https://api.servicem8.com/api_1.0/material.json with the
+        stored API key.  Active materials are upserted: prices updated for
+        existing rows, new rows inserted for unknowns.
+
+        Returns JSON: {ok, added, updated, skipped, total}
+        """
+        cfg = load_config()
+        api_key = cfg.get("servicem8ApiKey", "").strip()
+        if not api_key:
+            return self._send_error_json(
+                "No ServiceM8 API key configured. Add it in Settings first.")
+
+        if cfg["dbPath"].lower().endswith(".csv"):
+            return self._send_error_json(
+                "Parts DB is a CSV file — switch to SQLite in Settings to enable sync.")
+
+        # ── Fetch materials from ServiceM8 ──────────────────────────────
+        req = urllib.request.Request(
+            "https://api.servicem8.com/api_1.0/material.json",
+            headers={"X-API-Key": api_key, "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+            materials = json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                return self._send_error_json(
+                    "Authentication failed (401) — check your ServiceM8 API key.")
+            if exc.code == 403:
+                return self._send_error_json(
+                    "Permission denied (403) — ensure the API key has inventory access.")
+            return self._send_error_json("ServiceM8 API returned HTTP %d" % exc.code)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_error_json("Could not reach ServiceM8: " + str(exc))
+
+        if not isinstance(materials, list):
+            return self._send_error_json("Unexpected response format from ServiceM8 API.")
+
+        # Only sync active materials
+        active = [m for m in materials if str(m.get("active", "1")) in ("1", "true", "True")]
+        total = len(active)
+
+        # ── Open parts DB ───────────────────────────────────────────────
+        try:
+            con, table = get_connection(cfg)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_error_json("Cannot open parts DB: " + str(exc))
+
+        cols       = cfg["columns"]
+        col_part   = cols.get("part_no",     "part_no")
+        col_desc   = cols.get("description", "description")
+        col_cost   = cols.get("cost",        "cost")
+        col_retail = cols.get("retail",      "retail")
+        col_unit   = cols.get("unit",        "unit")
+        col_cat    = cols.get("category",    "category")
+
+        existing = {r[0] for r in
+                    con.execute('SELECT "%s" FROM "%s"' % (col_part, table)).fetchall()}
+
+        def safe_float(val):
+            if val is None:
+                return None
+            try:
+                return float(str(val).replace(",", "").strip())
+            except (TypeError, ValueError):
+                return None
+
+        added = updated = skipped = 0
+        sample_keys = list(active[0].keys()) if active else []
+
+        for m in active:
+            # item_number is the human-readable part number (e.g. "3421014-1")
+            part_no = str(m.get("item_number") or "").strip()
+            if not part_no:
+                part_no = str(m.get("uuid", "")).strip()
+            name = str(m.get("name", "")).strip()
+            if not part_no or not name:
+                skipped += 1
+                continue
+
+            cost   = safe_float(m.get("cost"))
+            retail = safe_float(m.get("price"))
+            unit   = str(m.get("unit") or "").strip() or "ea"
+
+            if part_no in existing:
+                sets, vals = [], []
+                sets.append('"%s"=?' % col_desc);   vals.append(name)
+                if cost   is not None: sets.append('"%s"=?' % col_cost);   vals.append(cost)
+                if retail is not None: sets.append('"%s"=?' % col_retail); vals.append(retail)
+                vals.append(part_no)
+                con.execute(
+                    'UPDATE "%s" SET %s WHERE "%s"=?' % (table, ",".join(sets), col_part), vals)
+                updated += 1
+            else:
+                con.execute(
+                    'INSERT INTO "%s" ("%s","%s","%s","%s","%s","%s") VALUES (?,?,?,?,?,?)'
+                    % (table, col_part, col_desc, col_cost, col_retail, col_unit, col_cat),
+                    [part_no, name,
+                     cost   if cost   is not None else 0.0,
+                     retail if retail is not None else 0.0,
+                     unit, "servicem8"],
+                )
+                existing.add(part_no)
+                added += 1
+
+            if (added + updated) % 500 == 0:
+                con.commit()
+
+        con.commit()
+        resp = {"ok": True, "added": added, "updated": updated,
+                "skipped": skipped, "total": total}
+        if sample_keys:
+            resp["_fields"] = sample_keys  # visible in browser devtools for debugging
+        return self._send_json(resp)
+
+    def _create_sm8_quote(self, body):
+        """Create a new ServiceM8 Quote job and populate it with material and labour lines.
+
+        SM8 quirks discovered via live API testing:
+        - POST responses return {"errorCode":0,"message":"OK"} — the created record UUID
+          comes back in the x-record-uuid response header, not the body.
+        - jobmaterial requires both 'price' AND 'displayed_amount' (both = per-unit sell price).
+          Sending 'unit_price' is silently ignored.
+
+        body: {
+            items: [{name, qty, unit_price}],
+            labour: {hrs, rate} | null
+        }
+        Returns: {ok, uuid} or {error}
+        """
+        cfg = load_config()
+        api_key = cfg.get("servicem8ApiKey", "").strip()
+        if not api_key:
+            return self._send_error_json(
+                "No ServiceM8 API key configured. Add it in Settings first.")
+
+        # Labour - Trade material UUID (confirmed via live API test)
+        LABOUR_TRADE_UUID = "acb3a461-53da-45ee-8a91-1e9a3bdacdfb"
+
+        def sm8_post(endpoint, payload):
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.servicem8.com/api_1.0/" + endpoint,
+                data=data,
+                headers={
+                    "X-API-Key": api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                record_uuid = resp.getheader("x-record-uuid", "")
+                resp_body = json.loads(resp.read().decode("utf-8"))
+            if resp_body.get("errorCode", 0) != 0:
+                raise RuntimeError(resp_body.get("message", "SM8 error"))
+            return record_uuid, resp_body
+
+        def sm8_get(endpoint):
+            req = urllib.request.Request(
+                "https://api.servicem8.com/api_1.0/" + endpoint,
+                headers={"X-API-Key": api_key, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        # 1. Create the job with status Quote
+        try:
+            job_uuid, _ = sm8_post("job.json", {"status": "Quote"})
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                return self._send_error_json(
+                    "Authentication failed (401) — check your ServiceM8 API key.")
+            body_text = ""
+            try:
+                body_text = exc.read().decode("utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+            return self._send_error_json(
+                "ServiceM8 returned HTTP %d creating job. %s" % (exc.code, body_text))
+        except Exception as exc:  # noqa: BLE001
+            return self._send_error_json("Could not reach ServiceM8: " + str(exc))
+
+        if not job_uuid:
+            return self._send_error_json(
+                "ServiceM8 did not return a job UUID in x-record-uuid header.")
+
+        # 2. Fetch the job to get the human-readable quote number
+        job_number = ""
+        try:
+            job_data = sm8_get("job/%s.json" % job_uuid)
+            job_number = str(job_data.get("generated_job_id", "")).strip()
+        except Exception:  # noqa: BLE001
+            pass  # non-fatal; UUID is fallback
+
+        # 3. Add material lines
+        warnings = []
+        for item in body.get("items", []):
+            qty = float(item.get("qty") or 0)
+            if qty <= 0:
+                continue
+            unit_price = round(float(item.get("unit_price") or 0), 4)
+            try:
+                sm8_post("jobmaterial.json", {
+                    "job_uuid": job_uuid,
+                    "name": str(item.get("name", "Item"))[:255],
+                    "quantity": round(qty, 4),
+                    "price": unit_price,
+                    "displayed_amount": unit_price,
+                    "active": 1,
+                })
+            except Exception as exc:  # noqa: BLE001
+                warnings.append("Line '%s': %s" % (item.get("name", "?"), exc))
+
+        # 4. Add labour as "Labour - Trade" material line
+        labour = body.get("labour")
+        if labour and float(labour.get("hrs") or 0) > 0:
+            hrs  = round(float(labour["hrs"]), 2)
+            rate = round(float(labour.get("rate") or 0), 2)
+            try:
+                sm8_post("jobmaterial.json", {
+                    "job_uuid": job_uuid,
+                    "material_uuid": LABOUR_TRADE_UUID,
+                    "name": "Labour - Trade",
+                    "quantity": hrs,
+                    "price": rate,
+                    "displayed_amount": rate,
+                    "active": 1,
+                })
+            except Exception as exc:  # noqa: BLE001
+                warnings.append("Labour line: " + str(exc))
+
+        result = {"ok": True, "uuid": job_uuid, "job_number": job_number}
+        if warnings:
+            result["warnings"] = warnings
+        return self._send_json(result)
 
     def _handle_dxf_import(self):
         """Parse a DXF file using only the Python stdlib.
@@ -1146,11 +1442,15 @@ class Handler(BaseHTTPRequestHandler):
         buf = io.BytesIO()
         ts = time.strftime("%Y%m%d_%H%M%S")
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            # All project JSON files
+            # All project JSON files (including subdirectories)
             if os.path.isdir(PROJECTS_DIR):
-                for fn in sorted(os.listdir(PROJECTS_DIR)):
-                    if fn.endswith(".json"):
-                        zf.write(os.path.join(PROJECTS_DIR, fn), "projects/" + fn)
+                for root, dirs, files in os.walk(PROJECTS_DIR):
+                    dirs.sort()
+                    for fn in sorted(files):
+                        if fn.endswith(".json"):
+                            full = os.path.join(root, fn)
+                            rel  = os.path.relpath(full, PROJECTS_DIR).replace(os.sep, "/")
+                            zf.write(full, "projects/" + rel)
             # Symbol library export
             try:
                 syms = db_load_symbols()
@@ -1215,12 +1515,16 @@ class Handler(BaseHTTPRequestHandler):
         restored_symbols  = 0
         for name in zf.namelist():
             if name.startswith("projects/") and name.endswith(".json"):
-                fn = os.path.basename(name)
-                if fn:
-                    dest = os.path.join(PROJECTS_DIR, fn)
-                    with open(dest, "wb") as f:
-                        f.write(zf.read(name))
-                    restored_projects += 1
+                rel = name[len("projects/"):]   # e.g. "folder/project.json"
+                if rel:
+                    dest = os.path.normpath(
+                        os.path.join(PROJECTS_DIR, rel.replace("/", os.sep))
+                    )
+                    if dest.startswith(os.path.normpath(PROJECTS_DIR) + os.sep):
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with open(dest, "wb") as f:
+                            f.write(zf.read(name))
+                        restored_projects += 1
             elif name == "symbols.json":
                 try:
                     syms = json.loads(zf.read(name).decode("utf-8"))
@@ -1242,6 +1546,7 @@ class Handler(BaseHTTPRequestHandler):
             p = project_path(name)
             if os.path.exists(p):
                 os.remove(p)
+                _cleanup_empty_dirs(os.path.dirname(p))
                 # Clear session if this was the last-open project
                 sess = load_session()
                 if sess.get("lastProject") == safe_project_name(name):
@@ -1288,9 +1593,11 @@ class Handler(BaseHTTPRequestHandler):
                 col_cat    = cols.get("category", "category")
                 col_unit   = cols.get("unit", "unit")
                 sets, vals = [], []
+                col_labour = cols.get("labour", "labour")
                 field_map = {
                     "description": col_desc, "cost": col_cost,
-                    "retail": col_retail, "category": col_cat, "unit": col_unit
+                    "retail": col_retail, "category": col_cat, "unit": col_unit,
+                    "labour": col_labour
                 }
                 for key, col in field_map.items():
                     if key in body and col:
@@ -1302,6 +1609,35 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute('UPDATE "%s" SET %s WHERE "%s"=?' % (table, ",".join(sets), col_part), vals)
                 con.commit()
                 return self._send_json({"ok": True})
+            return self._send_error_json("Unknown endpoint", 404)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_error_json(exc, 500)
+
+    def do_PATCH(self):
+        """PATCH /api/projects/<name>  — rename / move a project."""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        try:
+            if path.startswith("/api/projects/"):
+                name = urllib.parse.unquote(path[len("/api/projects/"):])
+                body = self._read_body()
+                new_name = (body.get("newName") or "").strip()
+                if not new_name:
+                    return self._send_error_json("newName required")
+                old_p = project_path(name)
+                new_p = project_path(new_name)
+                if not os.path.exists(old_p):
+                    return self._send_error_json("Project not found", 404)
+                if os.path.abspath(old_p) != os.path.abspath(new_p) and os.path.exists(new_p):
+                    return self._send_error_json("A project with that name already exists")
+                os.makedirs(os.path.dirname(new_p), exist_ok=True)
+                os.replace(old_p, new_p)
+                _cleanup_empty_dirs(os.path.dirname(old_p))
+                safe = safe_project_name(new_name)
+                sess = load_session()
+                if sess.get("lastProject") == safe_project_name(name):
+                    save_session({"lastProject": safe})
+                return self._send_json({"ok": True, "name": safe})
             return self._send_error_json("Unknown endpoint", 404)
         except Exception as exc:  # noqa: BLE001
             return self._send_error_json(exc, 500)
